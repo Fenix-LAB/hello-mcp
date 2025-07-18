@@ -1,0 +1,2 @@
+# Requirements for the MCP project
+# This file lists the dependencies needed to run the project.
