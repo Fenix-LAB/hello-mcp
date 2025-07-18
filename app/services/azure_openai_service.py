@@ -75,6 +75,7 @@ Always be helpful, accurate, and provide clear explanations of what you're doing
     
     async def _regular_completion(self, messages: List[Dict], tools: List[Dict]) -> Dict[str, Any]:
         """Handle non-streaming completion"""
+        logger.info("Making regular completion request to Azure OpenAI")
         response = await self.client.chat.completions.create(
             model=config.AZURE_OPENAI_DEPLOYMENT_NAME,
             messages=messages,
@@ -83,6 +84,7 @@ Always be helpful, accurate, and provide clear explanations of what you're doing
             max_tokens=config.MAX_TOKENS,
             temperature=config.TEMPERATURE,
         )
+        logger.info(f"Received response from Azure OpenAI: {response.choices[0].finish_reason}")
         
         message = response.choices[0].message
         

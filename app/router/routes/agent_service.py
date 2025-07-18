@@ -49,6 +49,8 @@ async def chat_endpoint(
         
         # Generate conversation ID if not provided
         conversation_id = data.conversation_id or str(uuid4())
+
+        logger.info(f"Processing chat for conversation ID: {conversation_id}")
         
         # Get response from Azure OpenAI
         result = await azure_openai_service.chat_completion(
@@ -56,6 +58,8 @@ async def chat_endpoint(
             conversation_history=data.conversation_history,
             stream=data.stream
         )
+
+        logger.info(f"Result received for conversation: {result}")
         
         # Create response
         response = ChatResponse(
