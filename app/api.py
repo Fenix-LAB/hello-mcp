@@ -5,7 +5,7 @@ from fastapi.responses import JSONResponse
 from config.logger_config import logger
 
 from config.config import config
-from app.api.api_router import router
+from app.router.api_router import router
 
 
 # from app.middleware import (
