@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 
 from config.logger_config import logger
+from config.config import config
 from app.services.azure_openai_service import azure_openai_service
 
 
@@ -30,6 +31,41 @@ class ChatResponse(BaseModel):
 
 
 router = APIRouter()
+
+
+@router.get("/diagnose")
+async def diagnose_azure_openai():
+    """
+    Diagnose Azure OpenAI configuration and connectivity.
+    """
+    try:
+        # Check configuration
+        config_status = {
+            "endpoint_configured": bool(config.AZURE_OPENAI_ENDPOINT),
+            "api_key_configured": bool(config.AZURE_OPENAI_API_KEY),
+            "deployment_configured": bool(config.AZURE_OPENAI_DEPLOYMENT_NAME),
+            "endpoint": config.AZURE_OPENAI_ENDPOINT,
+            "api_version": config.AZURE_OPENAI_API_VERSION,
+            "deployment": config.AZURE_OPENAI_DEPLOYMENT_NAME
+        }
+        
+        # Test connection
+        connection_test = await azure_openai_service.test_connection()
+        
+        return {
+            "status": "healthy" if connection_test else "unhealthy",
+            "configuration": config_status,
+            "connection_test": connection_test,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in diagnose endpoint: {str(e)}")
+        return {
+            "status": "error",
+            "error": str(e),
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
 
 
 @router.post("/chat", response_model=ChatResponse)
