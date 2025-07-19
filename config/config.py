@@ -2,7 +2,10 @@ import os
 import json
 
 from pydantic_settings import BaseSettings
+from dotenv import load_dotenv
 
+# Load environment variables from .env file
+load_dotenv()
 
 try:
     with open("config.json") as f:
