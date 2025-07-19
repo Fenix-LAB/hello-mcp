@@ -26,7 +26,7 @@ class ChatResponse(BaseModel):
     response: str
     conversation_id: str
     timestamp: str
-    usage: Optional[Dict[str, Any]] = None
+    # usage: Optional[Dict[str, Any]] = None
     tool_calls: Optional[List[str]] = None
 
 
@@ -96,17 +96,22 @@ async def chat_endpoint(
         )
 
         logger.info(f"Result received for conversation: {result}")
+
+        logger.info(
+            f"Chat response details: {result.get('response', '')[:100]}... "
+            f"Usage: {result.get('usage', {})}, Tool Calls: {result.get('tool_calls', [])}"
+        )
         
         # Create response
         response = ChatResponse(
             response=result["response"],
             conversation_id=conversation_id,
             timestamp=datetime.now(timezone.utc).isoformat(),
-            usage=result.get("usage"),
+            # usage=result.get("usage"),
             tool_calls=result.get("tool_calls")
         )
         
-        logger.info(f"Chat response generated for conversation: {conversation_id}")
+        logger.info(f"Chat response generated for conversation: {response}")
         return response
         
     except Exception as e:
