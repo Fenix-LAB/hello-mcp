@@ -274,14 +274,25 @@ async def mcp_chat_stream_endpoint(
             logger.info(f"Starting MCP streaming chat for: {data.message[:50]}...")
             
             # Get streaming response from MCP Agent Service
-            async for chunk in mcp_agent_service.chat_completion(
+            result = await mcp_agent_service.chat_completion(
                 message=data.message,
                 conversation_history=data.conversation_history,
                 stream=True,
                 user_id=data.user_id,
                 session_id=data.session_id
-            ):
-                yield f"data: {chunk}\n\n"
+            )
+            
+            # If result is a generator, iterate through it
+            if hasattr(result, '__aiter__'):
+                async for chunk in result:
+                    yield f"data: {chunk}\n\n"
+            else:
+                # If not streaming, simulate streaming
+                response_text = result.get("response", "")
+                words = response_text.split()
+                for word in words:
+                    yield f"data: {word} \n\n"
+                    await asyncio.sleep(0.05)
             
             yield "data: [DONE]\n\n"
             
