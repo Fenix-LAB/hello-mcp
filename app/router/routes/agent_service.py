@@ -245,7 +245,7 @@ async def mcp_chat_endpoint(
             response=result["response"],
             conversation_id=conversation_id,
             timestamp=datetime.now(timezone.utc).isoformat(),
-            usage=result.get("usage"),
+            # usage=result.get("usage"),
             tool_calls=result.get("tool_calls"),
             mcp_servers_used=result.get("mcp_servers_used")
         )
