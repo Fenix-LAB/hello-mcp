@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletion
 from agents import Agent, Runner, set_default_openai_client
+from agents.mcp.server import MCPServerSse
+from agents.model_settings import ModelSettings
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
@@ -27,33 +29,113 @@ class MCPAgentService:
             self.azure_client = self._create_azure_openai_client()
             set_default_openai_client(self.azure_client, use_for_tracing=False)
             
-            # Initialize MCP servers
+            # Initialize MCP servers containers
             self.mcp_servers = {}
             self.connected_servers = []
+            self._servers_initialized = False
             
             # System prompt for the agent
             self.system_prompt = """
-You are a helpful AI assistant with access to MCP (Model Context Protocol) servers.
-You can help users with various tasks by connecting to different MCP servers that provide specialized tools.
+You are a helpful AI assistant with access to MCP (Model Context Protocol) servers that provide specialized tools.
 
 Available capabilities:
 - General information and assistance
 - Access to external services through MCP servers
 - Data processing and analysis
 - Task automation
+- Real-time data retrieval from connected MCP servers
 
-When a user asks for something that requires external tools or services, I will use the appropriate MCP server to help them.
+You have access to MCP servers that can:
+- Search and retrieve GitHub repository information
+- Access documentation and README files
+- Perform external API calls
+- Process and analyze data
+
+When a user asks for something that requires external tools or services, use the appropriate MCP server to help them.
 Always be helpful, accurate, and provide clear explanations of what you're doing.
 """
-            
-            # Initialize example MCP server
-            asyncio.create_task(self._initialize_example_mcp_server())
             
             logger.info("MCP Agent Service initialized successfully")
             
         except Exception as e:
             logger.error(f"Failed to initialize MCP Agent Service: {str(e)}")
             raise
+            
+    async def _initialize_mcp_servers(self):
+        """Initialize and connect MCP servers for the agent"""
+        try:
+            logger.info("Initializing MCP servers...")
+            
+            # Configuration for MCP servers
+            mcp_server_configs = [
+                {
+                    "name": "deepwiki_mcp",
+                    "url": "https://mcp.deepwiki.com/sse",
+                    "description": "DeepWiki MCP Server for GitHub documentation and repository information",
+                    "headers": {
+                        "User-Agent": "MCP-Agent/1.0"
+                    },
+                    "timeout": 10.0,
+                    "sse_read_timeout": 300.0
+                }
+                # Puedes agregar más servidores MCP aquí
+            ]
+            
+            for server_config in mcp_server_configs:
+                try:
+                    logger.info(f"Connecting to MCP server: {server_config['name']} at {server_config['url']}")
+                    
+                    # Create MCP server connection
+                    mcp_server = MCPServerSse(
+                        params={
+                            "url": server_config["url"],
+                            "headers": server_config.get("headers", {}),
+                            "timeout": server_config.get("timeout", 5.0),
+                            "sse_read_timeout": server_config.get("sse_read_timeout", 300.0)
+                        },
+                        cache_tools_list=True,
+                        name=server_config["name"],
+                        client_session_timeout_seconds=30.0
+                    )
+                    
+                    # Connect to the MCP server
+                    try:
+                        await mcp_server.connect()
+                        logger.info(f"Successfully connected to MCP server: {server_config['name']}")
+                        
+                        # Store the MCP server instance
+                        self.mcp_servers[server_config["name"]] = mcp_server
+                        
+                        # Add to connected servers list
+                        self.connected_servers.append({
+                            "name": server_config["name"],
+                            "url": server_config["url"],
+                            "description": server_config["description"],
+                            "status": "connected",
+                            "server_instance": mcp_server
+                        })
+                        
+                        logger.info(f"Successfully configured MCP server: {server_config['name']}")
+                        
+                    except Exception as connect_error:
+                        logger.warning(f"Failed to connect to MCP server {server_config['name']}: {str(connect_error)}")
+                        continue
+                    
+                except Exception as e:
+                    logger.warning(f"Failed to configure MCP server {server_config['name']}: {str(e)}")
+                    continue
+            
+            logger.info(f"Initialized {len(self.mcp_servers)} MCP servers")
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize MCP servers: {str(e)}")
+    
+    async def _ensure_mcp_servers_initialized(self):
+        """Ensure MCP servers are initialized and connected"""
+        if not self._servers_initialized:
+            logger.info("Initializing MCP servers on first use...")
+            await self._initialize_mcp_servers()
+            self._servers_initialized = True
     
     def _create_azure_openai_client(self) -> AsyncOpenAI:
         """Create Azure OpenAI client"""
@@ -67,22 +149,6 @@ Always be helpful, accurate, and provide clear explanations of what you're doing
             timeout=30.0,
             max_retries=3
         )
-    
-    async def _initialize_example_mcp_server(self):
-        """Initialize example MCP server for testing"""
-        try:
-            # For now, we'll simulate an MCP server
-            # In real implementation, you would connect to actual MCP servers
-            self.connected_servers.append({
-                "name": "deepwiki_mcp",
-                "url": "http://localhost:3000/mcp",
-                "description": "DeepWiki MCP Server for knowledge retrieval",
-                "status": "connected",
-                "tools": ["search_knowledge", "get_article", "summarize_content"]
-            })
-            logger.info("Example MCP server initialized")
-        except Exception as e:
-            logger.error(f"Failed to initialize example MCP server: {str(e)}")
     
     async def test_connection(self) -> bool:
         """Test the connection to Azure OpenAI"""
@@ -130,100 +196,148 @@ Always be helpful, accurate, and provide clear explanations of what you're doing
             context = {
                 "user_id": user_id,
                 "session_id": session_id,
-                "mcp_servers": self.connected_servers
             }
             
-            # Try to use MCP Agent, fallback to Azure OpenAI if needed
+            # Use MCP Agent with MCP servers
             try:
-                # For now, skip MCP Agent creation and go directly to fallback
-                # This ensures consistent behavior until MCP servers are properly implemented
-                logger.info("Using Azure OpenAI directly (MCP Agent in development)")
-                return await self._fallback_completion(messages)
+                # Create a placeholder agent for context (the real one is created in _regular_completion)
+                agent = None
                 
-                # TODO: Uncomment when MCP Agent is fully implemented
-                # # Create agent (for now without actual MCP servers, just using Azure OpenAI)
-                # agent = Agent(
-                #     name="MCP Assistant",
-                #     instructions=self.system_prompt,
-                #     model=config.AZURE_OPENAI_DEPLOYMENT_NAME,
-                #     # mcp_servers=[]  # Will add actual MCP servers later
-                # )
-                # 
-                # if stream:
-                #     return await self._stream_completion(agent, messages, context)
-                # else:
-                #     return await self._regular_completion(agent, messages, context)
+                if stream:
+                    # For streaming, return the async generator directly
+                    return self._stream_completion(agent, messages, context)
+                else:
+                    return await self._regular_completion(agent, messages, context)
                     
             except Exception as agent_error:
-                logger.warning(f"MCP Agent failed, using fallback: {str(agent_error)}")
-                # Fallback to direct Azure OpenAI
-                return await self._fallback_completion(messages)
+                logger.error(f"MCP Agent failed: {str(agent_error)}")
+                raise Exception(f"Failed to process request with MCP Agent: {str(agent_error)}")
                 
         except Exception as e:
             logger.error(f"Error in MCP chat completion: {str(e)}")
-            # Final fallback
-            try:
-                return await self._fallback_completion(messages)
-            except Exception as fallback_error:
-                logger.error(f"Fallback also failed: {str(fallback_error)}")
-                return {
-                    "response": f"I apologize, but I'm currently experiencing technical difficulties: {str(e)}",
-                    "usage": {},
-                    "tool_calls": [],
-                    "mcp_servers_used": [],
-                    "finish_reason": "error"
-                }
+            raise Exception(f"Failed to process chat completion: {str(e)}")
+    
+    async def _create_agent(self) -> Agent:
+        """Create an OpenAI Agent with MCP servers"""
+        try:
+            # Ensure MCP servers are initialized
+            await self._ensure_mcp_servers_initialized()
+            
+            # Get list of MCP servers
+            mcp_server_list = [server["server_instance"] for server in self.connected_servers]
+            
+            if not mcp_server_list:
+                raise Exception("No MCP servers available")
+            
+            agent = Agent(
+                name="MCP Assistant",
+                instructions=self.system_prompt,
+                model=config.AZURE_OPENAI_DEPLOYMENT_NAME,
+                mcp_servers=mcp_server_list
+            )
+            
+            logger.info(f"Created agent with {len(mcp_server_list)} MCP servers")
+            return agent
+            
+        except Exception as e:
+            logger.error(f"Failed to create agent: {str(e)}")
+            raise
     
     async def _regular_completion(self, agent: Agent, messages: List[Dict], context: Dict) -> Dict[str, Any]:
-        """Handle non-streaming completion"""
+        """Handle non-streaming completion with MCP servers"""
         try:
             logger.info("Running MCP agent for regular completion...")
             
-            # For now, skip the Runner and go directly to fallback
-            # This avoids the "Unsupported data type" error until we have proper MCP servers
-            logger.info("Using fallback Azure OpenAI completion due to MCP Agent configuration...")
-            return await self._fallback_completion(messages)
+            # Use the last user message as input for the runner
+            user_message = messages[-1]["content"] if messages else "Hello"
             
-            # TODO: Uncomment when MCP Agent is properly configured
-            # # Run the agent and await the result properly
-            # runner_result = await Runner.run(
-            #     starting_agent=agent,
-            #     input=messages,
-            #     context=context
-            # )
-            # 
-            # # Extract the final response
-            # final_response = getattr(runner_result, 'final_output', None)
-            # 
-            # logger.info(f"MCP agent completed successfully")
-            # 
-            # # For now, simulate the response structure
-            # # In real implementation, you would extract actual usage and tool call info
-            # return {
-            #     "response": str(final_response) if final_response else "I'm ready to help you with your request.",
-            #     "usage": {
-            #         "total_tokens": 0,
-            #         "prompt_tokens": 0,
-            #         "completion_tokens": 0
-            #     },
-            #     "tool_calls": [],
-            #     "mcp_servers_used": [server["name"] for server in self.connected_servers],
-            #     "finish_reason": "stop"
-            # }
+            # Use context manager for MCP server connection (like in the official example)
+            mcp_server_configs = [
+                {
+                    "name": "deepwiki_mcp",
+                    "url": "https://mcp.deepwiki.com/sse",
+                }
+            ]
+            
+            # Try with the first available server
+            async with MCPServerSse(
+                name="DeepWiki MCP Server",
+                params={
+                    "url": "https://mcp.deepwiki.com/sse",
+                },
+            ) as mcp_server:
+                
+                # Create agent with MCP server and ModelSettings like the example
+                agent = Agent(
+                    name="Assistant",
+                    instructions="Use the tools to answer the questions.",
+                    model="gpt-4o",  # Use simple model name instead of deployment name
+                    mcp_servers=[mcp_server],
+                    model_settings=ModelSettings(tool_choice="auto")  # Change to auto instead of required
+                )
+                
+                # Run the agent with MCP servers
+                runner_result = await Runner.run(
+                    starting_agent=agent,
+                    input=user_message
+                )
+                
+                # Extract the response from the runner result
+                response_content = runner_result.final_output or str(runner_result)
+            
+            logger.info(f"MCP agent completed successfully - Response length: {len(str(response_content))} chars")
+            
+            return {
+                "response": str(response_content),
+                "usage": {
+                    "total_tokens": getattr(runner_result, 'total_tokens', 0),
+                    "prompt_tokens": getattr(runner_result, 'prompt_tokens', 0),
+                    "completion_tokens": getattr(runner_result, 'completion_tokens', 0)
+                },
+                "tool_calls": getattr(runner_result, 'tool_calls', []),
+                "mcp_servers_used": ["deepwiki_mcp"],
+                "finish_reason": "stop"
+            }
             
         except Exception as e:
             logger.error(f"Error in _regular_completion: {str(e)}")
-            # Fallback to direct Azure OpenAI call
-            return await self._fallback_completion(messages)
+            raise Exception(f"MCP Agent completion failed: {str(e)}")
     
     async def _stream_completion(self, agent: Agent, messages: List[Dict], context: Dict) -> AsyncGenerator[str, None]:
-        """Handle streaming completion"""
+        """Handle streaming completion with MCP servers"""
         try:
             logger.info("Running MCP agent for streaming completion...")
             
-            # For now, use regular completion and simulate streaming
-            result = await self._fallback_completion(messages)
-            response_text = result.get("response", "No response available")
+            # Use the last user message as input for the runner
+            user_message = messages[-1]["content"] if messages else "Hello"
+            
+            # Use context manager for MCP server connection (like in the official example)
+            async with MCPServerSse(
+                name="DeepWiki MCP Server",
+                params={
+                    "url": "https://mcp.deepwiki.com/sse",
+                },
+            ) as mcp_server:
+                
+                # Create agent with MCP server and ModelSettings like the example
+                agent = Agent(
+                    name="Assistant",
+                    instructions="Use the tools to answer the questions.",
+                    model="gpt-4o",  # Use simple model name instead of deployment name
+                    mcp_servers=[mcp_server],
+                    model_settings=ModelSettings(tool_choice="auto")  # Change to auto instead of required
+                )
+                
+                # Run the agent with MCP servers
+                runner_result = await Runner.run(
+                    starting_agent=agent,
+                    input=user_message
+                )
+                
+                # Extract the response from the runner result
+                response_content = runner_result.final_output or str(runner_result)
+            
+            response_text = str(response_content)
             
             # Simulate streaming by yielding words
             words = response_text.split()
@@ -235,53 +349,19 @@ Always be helpful, accurate, and provide clear explanations of what you're doing
             logger.error(f"Error in _stream_completion: {str(e)}")
             yield f"Error: {str(e)}"
     
-    async def _fallback_completion(self, messages: List[Dict]) -> Dict[str, Any]:
-        """Fallback to direct Azure OpenAI call"""
-        try:
-            logger.info("Using fallback Azure OpenAI completion...")
-            
-            response = await self.azure_client.chat.completions.create(
-                model=config.AZURE_OPENAI_DEPLOYMENT_NAME,
-                messages=messages,
-                max_tokens=config.MAX_TOKENS,
-                temperature=config.TEMPERATURE
-            )
-            
-            # Ensure we get the complete response
-            response_content = response.choices[0].message.content or "No response generated"
-            
-            logger.info(f"Fallback completion successful - Response length: {len(response_content)} chars")
-            
-            return {
-                "response": response_content,
-                "usage": dict(response.usage) if response.usage else {},
-                "tool_calls": [],
-                "mcp_servers_used": [server["name"] for server in self.connected_servers],
-                "finish_reason": response.choices[0].finish_reason
-            }
-            
-        except Exception as e:
-            logger.error(f"Error in fallback completion: {str(e)}")
-            return {
-                "response": f"I apologize, but I encountered an error: {str(e)}",
-                "usage": {},
-                "tool_calls": [],
-                "mcp_servers_used": [],
-                "finish_reason": "error"
-            }
-    
     async def get_mcp_servers_info(self) -> List[Dict[str, Any]]:
         """Get information about connected MCP servers"""
         return self.connected_servers
     
     async def stream_chat_completion(self, message: str, history: List[Dict] = None) -> AsyncGenerator[str, None]:
-        """Stream chat completion with fallback"""
+        """Stream chat completion with MCP agent"""
         messages = history or []
         messages.append({"role": "user", "content": message})
         
         try:
-            # Use fallback streaming directly
-            async for chunk in self._stream_completion(None, messages, {}):
+            # Use MCP agent for streaming
+            agent = await self._create_agent()
+            async for chunk in self._stream_completion(agent, messages, {}):
                 yield chunk
         
         except Exception as e:
@@ -291,14 +371,34 @@ Always be helpful, accurate, and provide clear explanations of what you're doing
     async def add_mcp_server(self, name: str, url: str, description: str = "") -> bool:
         """Add a new MCP server"""
         try:
-            # For now, just add to the list
-            # In real implementation, you would establish actual connection
+            logger.info(f"Adding new MCP server: {name} at {url}")
+            
+            # Create new MCP server connection
+            new_mcp_server = MCPServerSse(
+                params={
+                    "url": url,
+                    "headers": {"User-Agent": "MCP-Agent/1.0"},
+                    "timeout": 10.0,
+                    "sse_read_timeout": 300.0
+                },
+                cache_tools_list=True,
+                name=name,
+                client_session_timeout_seconds=30.0
+            )
+            
+            # Connect to the MCP server
+            await new_mcp_server.connect()
+            
+            # Add to MCP servers dictionary
+            self.mcp_servers[name] = new_mcp_server
+            
+            # Add to connected servers list
             new_server = {
                 "name": name,
                 "url": url,
                 "description": description,
                 "status": "connected",
-                "tools": ["placeholder_tool"]  # Would be populated from actual MCP server
+                "server_instance": new_mcp_server
             }
             
             self.connected_servers.append(new_server)
