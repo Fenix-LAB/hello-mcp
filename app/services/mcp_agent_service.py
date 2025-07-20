@@ -133,37 +133,55 @@ Always be helpful, accurate, and provide clear explanations of what you're doing
                 "mcp_servers": self.connected_servers
             }
             
-            # Create agent (for now without actual MCP servers, just using Azure OpenAI)
-            agent = Agent(
-                name="MCP Assistant",
-                instructions=self.system_prompt,
-                model=config.AZURE_OPENAI_DEPLOYMENT_NAME,
-                # mcp_servers=[]  # Will add actual MCP servers later
-            )
-            
-            if stream:
-                return await self._stream_completion(agent, messages, context)
-            else:
-                return await self._regular_completion(agent, messages, context)
+            # Try to use MCP Agent, fallback to Azure OpenAI if needed
+            try:
+                # Create agent (for now without actual MCP servers, just using Azure OpenAI)
+                agent = Agent(
+                    name="MCP Assistant",
+                    instructions=self.system_prompt,
+                    model=config.AZURE_OPENAI_DEPLOYMENT_NAME,
+                    # mcp_servers=[]  # Will add actual MCP servers later
+                )
+                
+                if stream:
+                    return await self._stream_completion(agent, messages, context)
+                else:
+                    return await self._regular_completion(agent, messages, context)
+                    
+            except Exception as agent_error:
+                logger.warning(f"MCP Agent failed, using fallback: {str(agent_error)}")
+                # Fallback to direct Azure OpenAI
+                return await self._fallback_completion(messages)
                 
         except Exception as e:
             logger.error(f"Error in MCP chat completion: {str(e)}")
-            raise Exception(f"Failed to get MCP response: {str(e)}")
+            # Final fallback
+            try:
+                return await self._fallback_completion(messages)
+            except Exception as fallback_error:
+                logger.error(f"Fallback also failed: {str(fallback_error)}")
+                return {
+                    "response": f"I apologize, but I'm currently experiencing technical difficulties: {str(e)}",
+                    "usage": {},
+                    "tool_calls": [],
+                    "mcp_servers_used": [],
+                    "finish_reason": "error"
+                }
     
     async def _regular_completion(self, agent: Agent, messages: List[Dict], context: Dict) -> Dict[str, Any]:
         """Handle non-streaming completion"""
         try:
             logger.info("Running MCP agent for regular completion...")
             
-            # Run the agent and await the result
-            runner_result = Runner.run(
+            # Run the agent and await the result properly
+            runner_result = await Runner.run(
                 starting_agent=agent,
                 input=messages,
                 context=context
             )
             
-            # The result should be awaited properly
-            final_response = runner_result.final_output
+            # Extract the final response
+            final_response = getattr(runner_result, 'final_output', None)
             
             logger.info(f"MCP agent completed successfully")
             
@@ -193,7 +211,7 @@ Always be helpful, accurate, and provide clear explanations of what you're doing
             
             # For now, fallback to regular completion and simulate streaming
             result = await self._regular_completion(agent, messages, context)
-            response_text = result["response"]
+            response_text = result.get("response", "No response available")
             
             # Simulate streaming by yielding words
             words = response_text.split()
