@@ -135,6 +135,11 @@ curl -X POST "http://localhost:8080/api/agent/mcp/servers" \
   }'
 ```
 
+### Remove MCP Server
+```bash
+curl -X DELETE "http://localhost:8080/api/agent/mcp/servers/filesystem_mcp"
+```
+
 ### Stream Chat
 ```bash
 curl -X POST "http://localhost:8080/api/agent/mcp/chat-stream" \
