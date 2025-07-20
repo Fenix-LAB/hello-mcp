@@ -6,9 +6,10 @@ import asyncio
 from typing import List, Dict, Any, Optional, AsyncGenerator
 from datetime import datetime, timezone
 from openai import AsyncOpenAI
-from openai_agents import Agent, Runner, StreamEvent, set_default_openai_client, MCPServerSse
+from agents import Agent, Runner, StreamEvent, set_default_openai_client
 from openai.types.responses import ResponseTextDeltaEvent, ResponseOutputItemDoneEvent, ResponseFunctionToolCall
-from openai_agents import ToolCallOutputItem
+from agents import ToolCallOutputItem
+from agents.mcp.server import MCPServerSse
 
 from config.config import config
 from config.logger_config import logger
@@ -77,9 +78,9 @@ Available MCP servers will be automatically connected and their tools will be av
             # Example MCP server - replace with your actual MCP server URLs
             example_mcp_servers = [
                 {
-                    "name": "filesystem_mcp",
-                    "url": "http://localhost:3001",  # Example filesystem MCP server
-                    "description": "File system operations MCP server"
+                    "name": "deepwiki_mcp",
+                    "url": "https://mcp.deepwiki.com/sse",
+                    "description": "DeepWiki public MCP server for GitHub docs"
                 },
                 # Add more MCP servers here as needed
                 # {
@@ -94,7 +95,7 @@ Available MCP servers will be automatically connected and their tools will be av
                     logger.info(f"Connecting to MCP server: {server_config['name']} at {server_config['url']}")
                     
                     # Create MCP server connection
-                    mcp_server = MCPServerSse(url=server_config["url"])
+                    mcp_server = MCPServerSse(params={"url": server_config["url"]})
                     await mcp_server.connect()
                     
                     self.mcp_servers.append({
