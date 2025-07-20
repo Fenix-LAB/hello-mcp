@@ -135,18 +135,24 @@ Always be helpful, accurate, and provide clear explanations of what you're doing
             
             # Try to use MCP Agent, fallback to Azure OpenAI if needed
             try:
-                # Create agent (for now without actual MCP servers, just using Azure OpenAI)
-                agent = Agent(
-                    name="MCP Assistant",
-                    instructions=self.system_prompt,
-                    model=config.AZURE_OPENAI_DEPLOYMENT_NAME,
-                    # mcp_servers=[]  # Will add actual MCP servers later
-                )
+                # For now, skip MCP Agent creation and go directly to fallback
+                # This ensures consistent behavior until MCP servers are properly implemented
+                logger.info("Using Azure OpenAI directly (MCP Agent in development)")
+                return await self._fallback_completion(messages)
                 
-                if stream:
-                    return await self._stream_completion(agent, messages, context)
-                else:
-                    return await self._regular_completion(agent, messages, context)
+                # TODO: Uncomment when MCP Agent is fully implemented
+                # # Create agent (for now without actual MCP servers, just using Azure OpenAI)
+                # agent = Agent(
+                #     name="MCP Assistant",
+                #     instructions=self.system_prompt,
+                #     model=config.AZURE_OPENAI_DEPLOYMENT_NAME,
+                #     # mcp_servers=[]  # Will add actual MCP servers later
+                # )
+                # 
+                # if stream:
+                #     return await self._stream_completion(agent, messages, context)
+                # else:
+                #     return await self._regular_completion(agent, messages, context)
                     
             except Exception as agent_error:
                 logger.warning(f"MCP Agent failed, using fallback: {str(agent_error)}")
@@ -173,31 +179,37 @@ Always be helpful, accurate, and provide clear explanations of what you're doing
         try:
             logger.info("Running MCP agent for regular completion...")
             
-            # Run the agent and await the result properly
-            runner_result = await Runner.run(
-                starting_agent=agent,
-                input=messages,
-                context=context
-            )
+            # For now, skip the Runner and go directly to fallback
+            # This avoids the "Unsupported data type" error until we have proper MCP servers
+            logger.info("Using fallback Azure OpenAI completion due to MCP Agent configuration...")
+            return await self._fallback_completion(messages)
             
-            # Extract the final response
-            final_response = getattr(runner_result, 'final_output', None)
-            
-            logger.info(f"MCP agent completed successfully")
-            
-            # For now, simulate the response structure
-            # In real implementation, you would extract actual usage and tool call info
-            return {
-                "response": str(final_response) if final_response else "I'm ready to help you with your request.",
-                "usage": {
-                    "total_tokens": 0,
-                    "prompt_tokens": 0,
-                    "completion_tokens": 0
-                },
-                "tool_calls": [],
-                "mcp_servers_used": [server["name"] for server in self.connected_servers],
-                "finish_reason": "stop"
-            }
+            # TODO: Uncomment when MCP Agent is properly configured
+            # # Run the agent and await the result properly
+            # runner_result = await Runner.run(
+            #     starting_agent=agent,
+            #     input=messages,
+            #     context=context
+            # )
+            # 
+            # # Extract the final response
+            # final_response = getattr(runner_result, 'final_output', None)
+            # 
+            # logger.info(f"MCP agent completed successfully")
+            # 
+            # # For now, simulate the response structure
+            # # In real implementation, you would extract actual usage and tool call info
+            # return {
+            #     "response": str(final_response) if final_response else "I'm ready to help you with your request.",
+            #     "usage": {
+            #         "total_tokens": 0,
+            #         "prompt_tokens": 0,
+            #         "completion_tokens": 0
+            #     },
+            #     "tool_calls": [],
+            #     "mcp_servers_used": [server["name"] for server in self.connected_servers],
+            #     "finish_reason": "stop"
+            # }
             
         except Exception as e:
             logger.error(f"Error in _regular_completion: {str(e)}")
@@ -209,8 +221,8 @@ Always be helpful, accurate, and provide clear explanations of what you're doing
         try:
             logger.info("Running MCP agent for streaming completion...")
             
-            # For now, fallback to regular completion and simulate streaming
-            result = await self._regular_completion(agent, messages, context)
+            # For now, use regular completion and simulate streaming
+            result = await self._fallback_completion(messages)
             response_text = result.get("response", "No response available")
             
             # Simulate streaming by yielding words
@@ -235,8 +247,13 @@ Always be helpful, accurate, and provide clear explanations of what you're doing
                 temperature=config.TEMPERATURE
             )
             
+            # Ensure we get the complete response
+            response_content = response.choices[0].message.content or "No response generated"
+            
+            logger.info(f"Fallback completion successful - Response length: {len(response_content)} chars")
+            
             return {
-                "response": response.choices[0].message.content,
+                "response": response_content,
                 "usage": dict(response.usage) if response.usage else {},
                 "tool_calls": [],
                 "mcp_servers_used": [server["name"] for server in self.connected_servers],
@@ -256,6 +273,20 @@ Always be helpful, accurate, and provide clear explanations of what you're doing
     async def get_mcp_servers_info(self) -> List[Dict[str, Any]]:
         """Get information about connected MCP servers"""
         return self.connected_servers
+    
+    async def stream_chat_completion(self, message: str, history: List[Dict] = None) -> AsyncGenerator[str, None]:
+        """Stream chat completion with fallback"""
+        messages = history or []
+        messages.append({"role": "user", "content": message})
+        
+        try:
+            # Use fallback streaming directly
+            async for chunk in self._stream_completion(None, messages, {}):
+                yield chunk
+        
+        except Exception as e:
+            logger.error(f"Error in stream_chat_completion: {str(e)}")
+            yield f"Error: {str(e)}"
     
     async def add_mcp_server(self, name: str, url: str, description: str = "") -> bool:
         """Add a new MCP server"""
