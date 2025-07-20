@@ -1,15 +1,12 @@
-from fastapi import Depends, FastAPI, Request
+"""
+FastAPI Server Entry Point
+"""
+from fastapi import FastAPI
 from fastapi.middleware import Middleware
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from config.logger_config import logger
-
 from config.config import config
 from app.router.api_router import router
-
-
-def init_routers(app_: FastAPI) -> None:
-    app_.include_router(router, prefix=config.ROUTE_PATH)
 
 
 def make_middleware() -> list[Middleware]:
@@ -35,7 +32,10 @@ def create_app() -> FastAPI:
         redoc_url=None if config.ENV == "production" else "/redoc",
         middleware=make_middleware(),
     )
-    init_routers(app_=app_)
+    
+    # Include routers
+    app_.include_router(router, prefix=config.ROUTE_PATH)
+    
     logger.info("SERVER: Event 'start up'")
 
     @app_.on_event("startup")
@@ -50,5 +50,6 @@ def create_app() -> FastAPI:
 
     logger.info("SERVER: App created")
     return app_
+
 
 app = create_app()

@@ -90,6 +90,15 @@ API documentation: http://localhost:8080/docs
 ## Usage Examples
 
 ### Basic Chat (MCP)
+
+My last chat:
+
+```bash
+{
+  "message": "Podrias ayudarme a obtener el readme de el siguiente repositorio usando deep wiki: openai-python"
+}
+```
+
 ```bash
 curl -X POST "http://localhost:8080/api/agent/mcp/chat" \
   -H "Content-Type: application/json" \
