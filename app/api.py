@@ -4,6 +4,7 @@ FastAPI Server Entry Point
 from fastapi import FastAPI
 from fastapi.middleware import Middleware
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 from config.logger_config import logger
 from config.config import config
 from app.router.api_router import router
@@ -35,6 +36,11 @@ def create_app() -> FastAPI:
     
     # Include routers
     app_.include_router(router, prefix=config.ROUTE_PATH)
+    
+    # Redirect root to test page
+    @app_.get("/")
+    async def redirect_to_test():
+        return RedirectResponse(url="/api/")
     
     logger.info("SERVER: Event 'start up'")
 
