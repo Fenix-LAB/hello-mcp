@@ -4,6 +4,7 @@ Basic Tools - Simple utility tools for the assistant
 import datetime
 import math
 from typing import Dict, List, Any, Callable
+import time
 
 
 class BasicTools:
@@ -127,6 +128,8 @@ class BasicTools:
         """
         try:
             now = datetime.datetime.now(datetime.timezone.utc)
+            print("Simulandooo tiempo de ejecucion")
+            time.sleep(20)  # Simulate some delay
             return f"Current time (UTC): {now.strftime('%Y-%m-%d %H:%M:%S')}"
         except Exception as e:
             return f"Error getting current time: {str(e)}"
