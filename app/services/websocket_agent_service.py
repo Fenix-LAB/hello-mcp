@@ -4,10 +4,12 @@ WebSocket Agent Service - Maneja conversaciones en tiempo real con el agente
 import asyncio
 import json
 import uuid
+import threading
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass, field
 from enum import Enum
+from concurrent.futures import ThreadPoolExecutor
 
 from openai import AsyncAzureOpenAI
 from openai.types.chat import ChatCompletionMessage, ChatCompletionMessageToolCall
@@ -53,6 +55,9 @@ class WebSocketAgentService:
         )
         self.tool_manager = ToolManager()
         self.active_sessions: Dict[str, VoiceSession] = {}
+        
+        # ThreadPoolExecutor para respuestas paralelas durante ejecución de herramientas
+        self.thread_pool = ThreadPoolExecutor(max_workers=5)
         
         # Prompt del sistema optimizado para conversación de voz
         self.system_prompt = """
@@ -166,62 +171,123 @@ Recuerda que esta es una conversación de voz, así que sé natural y expresivo 
         await self._process_with_openai(session)
 
     async def _handle_message_during_tool_execution(self, session: VoiceSession, content: str):
-        """Maneja mensajes del usuario mientras se ejecutan herramientas"""
-        # Respuestas predefinidas para diferentes tipos de mensajes
-        responses = {
-            "status": [
-                "¡Sí, aquí estoy! Estoy trabajando en tu solicitud anterior, pero puedo seguir conversando contigo.",
-                "¡Por supuesto! Sigo aquí procesando tu solicitud. ¿Hay algo más en lo que pueda ayudarte?",
-                "¡Claro que sí! Estoy ejecutando las herramientas que necesitas, pero puedo seguir charlando contigo.",
-                "¡Estoy aquí! Sigo trabajando en segundo plano en tu tarea anterior. ¿Qué más necesitas?"
-            ],
-            "greeting": [
-                "¡Hola! Estoy trabajando en tu solicitud anterior, pero puedo seguir conversando.",
-                "¡Hola de nuevo! Sigo procesando tu petición anterior mientras charlamos.",
-                "¡Saludos! Estoy multitarea: procesando tu solicitud y conversando contigo."
-            ],
-            "question": [
-                "Esa es una buena pregunta. Estoy procesando tu solicitud anterior, pero cuando termine te podré dar una respuesta más completa.",
-                "Interesante pregunta. Ahora mismo estoy ejecutando algunas herramientas para tu solicitud anterior, pero puedo intentar ayudarte.",
-                "Me gusta tu curiosidad. Estoy trabajando en segundo plano en tu tarea previa, pero sigamos conversando."
-            ],
-            "default": [
-                "Entiendo. Estoy procesando tu solicitud anterior en segundo plano, pero puedo seguir conversando contigo.",
-                "Perfecto. Mientras trabajo en tu tarea anterior, podemos seguir charlando sin problema.",
-                "Claro. Estoy ejecutando las herramientas necesarias para tu solicitud previa, pero sigo disponible para conversar.",
-                "Muy bien. Puedo hacer multitarea: procesar tu solicitud anterior y seguir conversando contigo."
-            ]
-        }
+        """Maneja mensajes del usuario mientras se ejecutan herramientas usando OpenAI dinámico"""
+        try:
+            # Ejecutar en un hilo separado para no bloquear la ejecución de herramientas
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                self.thread_pool,
+                self._generate_dynamic_response_during_tools,
+                session, content
+            )
+            
+            # Enviar respuesta generada dinámicamente
+            session.state = SessionState.SPEAKING
+            await self._send_response_chunks(session, response)
+            session.state = SessionState.IDLE
+            
+        except Exception as e:
+            logger.error(f"Error generando respuesta dinámica durante ejecución de herramientas: {str(e)}")
+            # Fallback a respuesta básica si falla OpenAI
+            await self._send_fallback_response_during_tools(session, content)
+    
+    def _generate_dynamic_response_during_tools(self, session: VoiceSession, content: str) -> str:
+        """Genera respuesta dinámica usando OpenAI en un hilo separado"""
+        import asyncio
+        import nest_asyncio
         
-        # Clasificar el tipo de mensaje
-        content_lower = content.lower()
+        # Permitir asyncio en hilos
+        nest_asyncio.apply()
         
-        if any(word in content_lower for word in ["sigues", "estás", "ahí", "aquí", "available", "there"]):
-            response_type = "status"
-        elif any(word in content_lower for word in ["hola", "hello", "hi", "saludos", "buenas"]):
-            response_type = "greeting"
-        elif content.endswith("?") or any(word in content_lower for word in ["qué", "cómo", "cuándo", "dónde", "por qué", "what", "how", "when", "where", "why"]):
-            response_type = "question"
-        else:
-            response_type = "default"
+        # Crear un nuevo evento loop para este hilo
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         
-        # Seleccionar respuesta (rotar para variedad)
+        try:
+            # Crear contexto especial para conversación paralela
+            pending_tools_info = []
+            for tool_id, task in session.pending_tools.items():
+                tool_name = "herramienta"  # Podríamos mejorar esto guardando el nombre
+                pending_tools_info.append(tool_name)
+            
+            tools_description = ", ".join(pending_tools_info) if pending_tools_info else "algunas herramientas"
+            
+            # Prompt específico para respuestas durante ejecución de herramientas
+            dynamic_prompt = f"""
+Eres un asistente de voz que está ejecutando herramientas en segundo plano. Actualmente tienes {len(session.pending_tools)} herramientas ejecutándose: {tools_description}.
+
+El usuario acaba de escribir: "{content}"
+
+CONTEXTO IMPORTANTE:
+- Estás procesando herramientas en segundo plano, pero puedes seguir conversando
+- No interrumpas las herramientas que se están ejecutando
+- Mantén la conversación fluida y natural
+- Si el usuario pregunta sobre el estado, tranquilízalo pero no des detalles técnicos
+- Si hace una nueva pregunta, responde pero menciona que las herramientas anteriores siguen ejecutándose
+
+INSTRUCCIONES:
+- Responde de manera natural y conversacional
+- Máximo 2-3 oraciones
+- Sé amigable y tranquilizador
+- No menciones detalles técnicos sobre las herramientas
+- Si es apropiado, pregunta algo relacionado o ofrece ayuda adicional
+
+Responde solo el texto de tu respuesta, sin explicaciones adicionales."""
+
+            # Crear cliente sincrónico para el hilo
+            from openai import AzureOpenAI
+            sync_client = AzureOpenAI(
+                azure_endpoint=config.AZURE_OPENAI_ENDPOINT,
+                api_key=config.AZURE_OPENAI_API_KEY,
+                api_version=config.AZURE_OPENAI_API_VERSION,
+                timeout=30.0
+            )
+            
+            # Generar respuesta
+            response = sync_client.chat.completions.create(
+                model=config.AZURE_OPENAI_DEPLOYMENT_NAME,
+                messages=[
+                    {"role": "system", "content": dynamic_prompt}
+                ],
+                max_tokens=150,
+                temperature=0.7,
+            )
+            
+            generated_response = response.choices[0].message.content.strip()
+            
+            # Agregar información sobre herramientas si es relevante
+            if len(session.pending_tools) > 0:
+                generated_response += f" (Tengo {len(session.pending_tools)} herramienta{'s' if len(session.pending_tools) > 1 else ''} trabajando en segundo plano)"
+            
+            return generated_response
+            
+        except Exception as e:
+            logger.error(f"Error en generación dinámica: {str(e)}")
+            # Fallback a respuesta predefinida
+            return f"Estoy aquí y sigo trabajando en tu solicitud anterior. {content} - Perfecto, sigamos conversando mientras proceso las herramientas en segundo plano."
+            
+        finally:
+            loop.close()
+    
+    async def _send_fallback_response_during_tools(self, session: VoiceSession, content: str):
+        """Envía respuesta de fallback si falla la generación dinámica"""
+        fallback_responses = [
+            "Estoy aquí y sigo trabajando en tu solicitud. ¿Hay algo más en lo que pueda ayudarte?",
+            "Perfecto. Mientras proceso tu solicitud anterior, podemos seguir conversando.",
+            "Entiendo. Estoy multitarea: trabajando en tu tarea anterior y disponible para conversar contigo.",
+            "¡Claro! Sigo procesando tu solicitud pero puedo seguir charlando contigo sin problema."
+        ]
+        
         import random
-        response = random.choice(responses[response_type])
+        response = random.choice(fallback_responses)
         
         # Agregar información sobre herramientas pendientes
-        pending_count = len(session.pending_tools)
-        if pending_count > 0:
-            tool_info = f" (Tengo {pending_count} herramienta{'s' if pending_count > 1 else ''} ejecutándose)"
-            response += tool_info
+        if len(session.pending_tools) > 0:
+            response += f" (Tengo {len(session.pending_tools)} herramienta{'s' if len(session.pending_tools) > 1 else ''} ejecutándose)"
         
-        # Enviar respuesta inmediata
         session.state = SessionState.SPEAKING
         await self._send_response_chunks(session, response)
         session.state = SessionState.IDLE
-        
-        # Agregar al historial para contexto futuro (pero no interferir con OpenAI mientras hay tools pendientes)
-        # Solo agregamos una nota interna, no el mensaje completo para evitar problemas con OpenAI
 
     async def _send_response_chunks(self, session: VoiceSession, response: str):
         """Envía respuesta en chunks para simular streaming"""
