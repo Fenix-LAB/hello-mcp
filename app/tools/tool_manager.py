@@ -1,6 +1,8 @@
 """
 Tool Manager - Manages all available tools for the assistant
 """
+import asyncio
+import json
 from typing import Dict, List, Any, Callable
 from config.logger_config import logger
 from app.tools.basic_tools import BasicTools
@@ -61,4 +63,4 @@ class ToolManager:
         return list(self.tools.keys())
 
 
-import asyncio
+# Se removió el import de asyncio duplicado que estaba al final
