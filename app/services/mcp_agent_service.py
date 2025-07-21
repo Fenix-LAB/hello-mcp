@@ -3,6 +3,7 @@ MCP Agent Service using OpenAI Agents with Azure OpenAI as provider
 """
 import asyncio
 import json
+import os
 from typing import List, Dict, Any, Optional, AsyncGenerator
 from datetime import datetime, timezone
 
@@ -26,9 +27,16 @@ class MCPAgentService:
         try:
             logger.info("Initializing MCP Agent Service...")
             
-            # Create Azure OpenAI client
+            # Create Azure OpenAI client for traditional endpoints
             self.azure_client = self._create_azure_openai_client()
-            set_default_openai_client(self.azure_client, use_for_tracing=False)
+            
+            # Configurar OpenAI directo para OpenAI Agents si hay API key
+            openai_api_key = os.getenv("OPENAI_API_KEY", "")
+            if openai_api_key:
+                logger.info("Using OpenAI direct API for Agents")
+                # OpenAI Agents usará la OPENAI_API_KEY automáticamente
+            else:
+                logger.warning("No OPENAI_API_KEY found - OpenAI Agents may fail")
             
             # Initialize MCP servers containers
             self.mcp_servers = {}
@@ -201,7 +209,7 @@ Always be helpful, accurate, and provide clear explanations of what you're doing
             
             # Use MCP Agent with MCP servers
             try:
-                # Create a placeholder agent for context (the real one is created in _regular_completion)
+                # Agent será creado en _regular_completion con el context manager
                 agent = None
                 
                 if stream:
@@ -219,26 +227,26 @@ Always be helpful, accurate, and provide clear explanations of what you're doing
             raise Exception(f"Failed to process chat completion: {str(e)}")
     
     async def _create_agent(self) -> Agent:
-        """Create an OpenAI Agent with MCP servers"""
+        """Create an OpenAI Agent with MCP servers using context manager"""
         try:
-            # Ensure MCP servers are initialized
-            await self._ensure_mcp_servers_initialized()
-            
-            # Get list of MCP servers
-            mcp_server_list = [server["server_instance"] for server in self.connected_servers]
-            
-            if not mcp_server_list:
-                raise Exception("No MCP servers available")
-            
-            agent = Agent(
-                name="MCP Assistant",
-                instructions=self.system_prompt,
-                model=config.AZURE_OPENAI_DEPLOYMENT_NAME,
-                mcp_servers=mcp_server_list
-            )
-            
-            logger.info(f"Created agent with {len(mcp_server_list)} MCP servers")
-            return agent
+            # Use context manager for MCP server like in the example
+            async with MCPServerSse(
+                name="DeepWiki MCP Server",
+                params={
+                    "url": "http://127.0.0.1:8000/sse",
+                },
+            ) as mcp_server:
+                
+                agent = Agent(
+                    name="Assistant",
+                    instructions="Use the tools to answer the questions.",
+                    model=config.AZURE_OPENAI_DEPLOYMENT_NAME,  # Usar deployment name de Azure
+                    mcp_servers=[mcp_server]
+                )
+                
+                print(f"Agent created: {agent.name} with model: {config.AZURE_OPENAI_DEPLOYMENT_NAME}")
+                logger.info(f"Created agent with MCP server")
+                return agent
             
         except Exception as e:
             logger.error(f"Failed to create agent: {str(e)}")
@@ -252,6 +260,7 @@ Always be helpful, accurate, and provide clear explanations of what you're doing
 
             print(f"User message: {user_message} type: {type(user_message)}")
 
+            # Usar context manager para crear tanto el server como el agent
             async with MCPServerSse(
                 name="DeepWiki MCP Server",
                 params={
@@ -259,20 +268,20 @@ Always be helpful, accurate, and provide clear explanations of what you're doing
                 },
             ) as mcp_server:
                 
+                # Crear el agent aquí con el server del context manager
                 agent = Agent(
                     name="Assistant",
                     instructions="Use the tools to answer the questions.",
-                    model="gpt-4o",  # Usar deployment name de Azure
-                    mcp_servers=[mcp_server],
-                    model_settings=ModelSettings(tool_choice="auto")
+                    model="gpt-4o",  # Usar modelo de OpenAI directo, no Azure
+                    mcp_servers=[mcp_server]
                 )
 
-                print(f"Agent created: {agent.name}")
+                # print(f"Agent created: {agent.name} with model: {config.AZURE_OPENAI_DEPLOYMENT_NAME}")
                 
                 try:
                     runner_result = await Runner.run(
                         starting_agent=agent,
-                        input=user_message  # Asegúrate que esto sea un string
+                        input=user_message
                     )
                 except Exception as runner_error:
                     print(f"Runner error details: {str(runner_error)}")
