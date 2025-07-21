@@ -38,6 +38,7 @@ class VoiceSession:
     state: SessionState = SessionState.IDLE
     conversation_history: List[Dict[str, str]] = field(default_factory=list)
     pending_tools: Dict[str, asyncio.Task] = field(default_factory=dict)
+    dynamic_responses_sent: List[str] = field(default_factory=list)  # Para trackear respuestas dinámicas
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     last_activity: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -188,6 +189,9 @@ Recuerda que esta es una conversación de voz, así que sé natural y expresivo 
             session.state = SessionState.SPEAKING
             await self._send_response_chunks(session, response)
             session.state = SessionState.IDLE
+            
+            # Registrar la respuesta dinámica enviada para evitar duplicaciones posteriores
+            session.dynamic_responses_sent.append(response)
             
             # IMPORTANTE: NO agregamos esta respuesta al historial principal
             # Solo es para mantener la conversación fluida durante la ejecución de herramientas
@@ -555,24 +559,41 @@ INSTRUCCIÓN ESPECÍFICA: Presenta los resultados de las herramientas de manera 
                 stream=True,
             )
             
-            # Enviar respuesta final en streaming
+            # Enviar respuesta final en streaming con detección de duplicaciones
             session.state = SessionState.SPEAKING
             final_response = ""
+            sent_content = ""  # Para trackear qué ya hemos enviado
+            
+            logger.info(f"Iniciando streaming de respuesta final. Respuestas dinámicas enviadas: {len(session.dynamic_responses_sent)}")
+            for i, dynamic_resp in enumerate(session.dynamic_responses_sent):
+                logger.info(f"Respuesta dinámica {i+1}: '{dynamic_resp[:60]}...'")
             
             async for chunk in response:
                 if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
                     content = chunk.choices[0].delta.content
                     final_response += content
-                    await self._send_message(session.websocket, {
-                        "type": "response_chunk",
-                        "content": content
-                    })
+                    
+                    # Verificar si este contenido no es una repetición de lo ya enviado O de respuestas dinámicas
+                    if not self._is_likely_duplication_with_context(session, sent_content, content):
+                        await self._send_message(session.websocket, {
+                            "type": "response_chunk",
+                            "content": content
+                        })
+                        sent_content += content
+                        logger.debug(f"Enviando chunk: '{content.strip()}'")
+                    else:
+                        logger.info(f"Bloqueando chunk duplicado durante streaming: '{content[:30]}...'")
             
-            # Agregar respuesta final al historial
-            if final_response:
+            logger.info(f"Streaming completado. Respuesta final completa: '{final_response[:100]}...'")
+            
+            # Limpiar duplicaciones en la respuesta final antes de agregarla al historial
+            cleaned_response = self._remove_duplications_with_dynamic_context(session, final_response)
+            
+            # Agregar respuesta final limpia al historial
+            if cleaned_response:
                 session.conversation_history.append({
                     "role": "assistant",
-                    "content": final_response
+                    "content": cleaned_response
                 })
             
             # Conversación completada
@@ -580,6 +601,9 @@ INSTRUCCIÓN ESPECÍFICA: Presenta los resultados de las herramientas de manera 
                 "type": "response_complete",
                 "content": "Respuesta completada"
             })
+            
+            # Limpiar respuestas dinámicas ya que la conversación se completó
+            session.dynamic_responses_sent.clear()
             
             session.state = SessionState.IDLE
             
@@ -590,6 +614,230 @@ INSTRUCCIÓN ESPECÍFICA: Presenta los resultados de las herramientas de manera 
                 "content": "Error procesando los resultados de las herramientas"
             })
             session.state = SessionState.IDLE
+    
+    def _remove_duplications(self, text: str) -> str:
+        """
+        Elimina duplicaciones de texto en respuestas
+        
+        Args:
+            text: Texto que puede contener duplicaciones
+            
+        Returns:
+            Texto sin duplicaciones
+        """
+        if not text or len(text.strip()) == 0:
+            return text
+        
+        logger.info("Eliminando duplicaciones en el texto de respuesta")
+            
+        # Dividir en oraciones
+        sentences = []
+        current_sentence = ""
+        
+        for char in text:
+            current_sentence += char
+            if char in '.!?':
+                sentences.append(current_sentence.strip())
+                current_sentence = ""
+        
+        # Agregar última oración si no termina en puntuación
+        if current_sentence.strip():
+            sentences.append(current_sentence.strip())
+        
+        # Eliminar oraciones duplicadas conservando el orden
+        seen_sentences = set()
+        unique_sentences = []
+        
+        for sentence in sentences:
+            # Normalizar para comparación (quitar espacios extra, convertir a minúsculas)
+            normalized = ' '.join(sentence.lower().split())
+            
+            # Solo agregar si no hemos visto esta oración antes
+            if normalized not in seen_sentences and len(normalized) > 3:  # Ignorar oraciones muy cortas
+                seen_sentences.add(normalized)
+                unique_sentences.append(sentence)
+        
+        # Reconstruir el texto
+        result = ' '.join(unique_sentences)
+        
+        # Limpiar espacios extra
+        result = ' '.join(result.split())
+        
+        logger.info(f"Texto sin duplicaciones: {result[:100]}...")  # Log solo los primeros 100 caracteres
+        return result
+    
+    def _remove_duplications_with_dynamic_context(self, session: VoiceSession, text: str) -> str:
+        """
+        Elimina duplicaciones teniendo en cuenta las respuestas dinámicas ya enviadas
+        
+        Args:
+            session: Sesión actual con historial de respuestas dinámicas
+            text: Texto que puede contener duplicaciones
+            
+        Returns:
+            Texto sin duplicaciones
+        """
+        if not text or len(text.strip()) == 0:
+            return text
+        
+        logger.info("Eliminando duplicaciones con contexto de respuestas dinámicas")
+        
+        # Obtener todas las respuestas dinámicas enviadas
+        all_dynamic_content = ' '.join(session.dynamic_responses_sent).lower()
+        
+        # Dividir en oraciones
+        sentences = []
+        current_sentence = ""
+        
+        for char in text:
+            current_sentence += char
+            if char in '.!?':
+                sentence = current_sentence.strip()
+                if sentence:
+                    sentences.append(sentence)
+                current_sentence = ""
+        
+        # Agregar última oración si no termina en puntuación
+        if current_sentence.strip():
+            sentences.append(current_sentence.strip())
+        
+        # Filtrar oraciones que ya aparecieron en respuestas dinámicas
+        unique_sentences = []
+        
+        for sentence in sentences:
+            sentence_normalized = ' '.join(sentence.lower().split())
+            
+            # Verificar si esta oración (o una muy similar) ya se envió dinámicamente
+            is_duplicate = False
+            
+            # Comparación exacta
+            if sentence_normalized in all_dynamic_content:
+                logger.info(f"Oración duplicada encontrada (exacta): '{sentence[:50]}...'")
+                is_duplicate = True
+            else:
+                # Comparación por similitud de contenido (75% de palabras en común)
+                sentence_words = set(sentence_normalized.split())
+                if len(sentence_words) >= 3:  # Solo para oraciones con al menos 3 palabras
+                    for dynamic_response in session.dynamic_responses_sent:
+                        dynamic_words = set(' '.join(dynamic_response.lower().split()).split())
+                        if len(dynamic_words) >= 3:
+                            common_words = sentence_words.intersection(dynamic_words)
+                            similarity = len(common_words) / len(sentence_words)
+                            
+                            if similarity >= 0.75:  # 75% de similitud
+                                logger.info(f"Oración similar encontrada ({similarity:.2%}): '{sentence[:50]}...'")
+                                is_duplicate = True
+                                break
+            
+            # Solo agregar si no es duplicada y tiene contenido sustancial
+            if not is_duplicate and len(sentence_normalized) > 3:
+                unique_sentences.append(sentence)
+            elif is_duplicate:
+                logger.info(f"Eliminando oración duplicada: '{sentence[:50]}...'")
+        
+        # Reconstruir el texto
+        result = ' '.join(unique_sentences)
+        
+        # Limpiar espacios extra
+        result = ' '.join(result.split())
+        
+        logger.info(f"Texto final sin duplicaciones: {result[:100]}...")
+        return result
+    
+    def _is_likely_duplication(self, sent_content: str, new_content: str) -> bool:
+        """
+        Detecta si el nuevo contenido es probablemente una duplicación
+        
+        Args:
+            sent_content: Contenido ya enviado
+            new_content: Nuevo contenido a evaluar
+            
+        Returns:
+            True si es probable que sea duplicación
+        """
+        if not sent_content or not new_content:
+            return False
+            
+        # Normalizar ambos textos
+        sent_normalized = ' '.join(sent_content.lower().split())
+        new_normalized = ' '.join(new_content.lower().split())
+        
+        # Si el nuevo contenido ya está contenido en lo enviado, es duplicación
+        if new_normalized in sent_normalized:
+            logger.info(f"Duplicación exacta detectada: '{new_normalized}' ya está en el contenido enviado")
+            return True
+        
+        # Verificar si estamos repitiendo frases completas
+        # Buscar secuencias de al menos 4 palabras consecutivas que ya se enviaron
+        new_words = new_normalized.split()
+        sent_words = sent_normalized.split()
+        
+        if len(new_words) >= 4 and len(sent_words) >= 4:
+            # Verificar secuencias de 4+ palabras
+            for i in range(len(new_words) - 3):
+                phrase = ' '.join(new_words[i:i+4])
+                if phrase in sent_normalized:
+                    logger.info(f"Duplicación de frase detectada: '{phrase}' ya fue enviada")
+                    return True
+        
+        # Verificar patrones de repetición al inicio (como cuando se repite el comienzo)
+        if len(sent_words) >= 5 and len(new_words) >= 3:
+            last_words = ' '.join(sent_words[-5:])
+            first_words = ' '.join(new_words[:3])
+            
+            if first_words in last_words:
+                logger.info(f"Patrón de repetición detectado: '{first_words}' en '{last_words}'")
+                return True
+        
+        return False
+    
+    def _is_likely_duplication_with_context(self, session: VoiceSession, sent_content: str, new_content: str) -> bool:
+        """
+        Detecta duplicaciones considerando tanto el contenido ya enviado como las respuestas dinámicas
+        
+        Args:
+            session: Sesión actual con historial de respuestas dinámicas
+            sent_content: Contenido ya enviado en esta respuesta
+            new_content: Nuevo contenido a evaluar
+            
+        Returns:
+            True si es probable que sea duplicación
+        """
+        if not new_content:
+            return False
+            
+        # Normalizar el nuevo contenido
+        new_normalized = ' '.join(new_content.lower().split())
+        
+        # Verificar duplicación con contenido ya enviado en esta respuesta
+        if sent_content:
+            sent_normalized = ' '.join(sent_content.lower().split())
+            if new_normalized in sent_normalized:
+                logger.info(f"Duplicación en respuesta actual: '{new_normalized}'")
+                return True
+        
+        # Verificar duplicación con respuestas dinámicas enviadas anteriormente
+        for dynamic_response in session.dynamic_responses_sent:
+            dynamic_normalized = ' '.join(dynamic_response.lower().split())
+            
+            # Verificar si el nuevo contenido ya aparece en alguna respuesta dinámica
+            if new_normalized in dynamic_normalized:
+                logger.info(f"Duplicación con respuesta dinámica: '{new_normalized}' ya está en '{dynamic_response[:50]}...'")
+                return True
+            
+            # Verificar secuencias de palabras que ya se enviaron dinámicamente
+            new_words = new_normalized.split()
+            dynamic_words = dynamic_normalized.split()
+            
+            if len(new_words) >= 2 and len(dynamic_words) >= 2:
+                # Buscar secuencias de 2+ palabras que coincidan
+                for i in range(len(new_words) - 1):
+                    phrase = ' '.join(new_words[i:i+2])
+                    if phrase in dynamic_normalized and len(phrase) > 4:  # Evitar palabras muy cortas
+                        logger.info(f"Secuencia duplicada detectada: '{phrase}' de respuesta dinámica")
+                        return True
+        
+        return False
 
     async def close_session(self, session_id: str):
         """Cierra una sesión de conversación"""
