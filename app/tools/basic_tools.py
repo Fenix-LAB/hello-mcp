@@ -1,10 +1,10 @@
 """
 Basic Tools - Simple utility tools for the assistant
 """
+import asyncio
 import datetime
 import math
 from typing import Dict, List, Any, Callable
-import time
 
 
 class BasicTools:
@@ -16,7 +16,8 @@ class BasicTools:
             "calculate": self.calculate,
             "get_current_time": self.get_current_time,
             "get_weather_info": self.get_weather_info,
-            "text_analysis": self.text_analysis
+            "text_analysis": self.text_analysis,
+            "slow_process": self.slow_process
         }
     
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
@@ -89,6 +90,23 @@ class BasicTools:
                         "required": ["text"]
                     }
                 }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "slow_process",
+                    "description": "Simula un proceso lento que toma 10 segundos para completarse",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "task_name": {
+                                "type": "string",
+                                "description": "Nombre de la tarea a ejecutar",
+                                "default": "Proceso lento"
+                            }
+                        }
+                    }
+                }
             }
         ]
     
@@ -116,9 +134,9 @@ class BasicTools:
         except Exception as e:
             return f"Error calculating '{expression}': {str(e)}"
     
-    def get_current_time(self, timezone: str = "UTC") -> str:
+    async def get_current_time(self, timezone: str = "UTC") -> str:
         """
-        Get current date and time
+        Get current date and time (now with async simulation)
         
         Args:
             timezone: Timezone (currently only UTC supported)
@@ -128,8 +146,11 @@ class BasicTools:
         """
         try:
             now = datetime.datetime.now(datetime.timezone.utc)
-            print("Simulandooo tiempo de ejecucion")
-            time.sleep(20)  # Simulate some delay
+            print("Simulando tiempo de ejecución de forma asíncrona...")
+            
+            # Usar asyncio.sleep en lugar de time.sleep para no bloquear
+            await asyncio.sleep(20)  # Simulate async delay without blocking
+            
             return f"Current time (UTC): {now.strftime('%Y-%m-%d %H:%M:%S')}"
         except Exception as e:
             return f"Error getting current time: {str(e)}"
@@ -172,3 +193,21 @@ class BasicTools:
             
         except Exception as e:
             return f"Error analyzing text: {str(e)}"
+    
+    async def slow_process(self, task_name: str = "Proceso lento") -> str:
+        """
+        Simula un proceso lento que toma 10 segundos
+        
+        Args:
+            task_name: Nombre de la tarea a ejecutar
+            
+        Returns:
+            Resultado del proceso lento
+        """
+        try:
+            # Simular proceso lento de 10 segundos
+            await asyncio.sleep(10)
+            return f"Proceso '{task_name}' completado después de 10 segundos de trabajo intensivo."
+            
+        except Exception as e:
+            return f"Error en proceso lento: {str(e)}"

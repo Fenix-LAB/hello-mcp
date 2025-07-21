@@ -143,6 +143,12 @@ Recuerda que esta es una conversación de voz, así que sé natural y expresivo 
             "content": "Mensaje recibido"
         })
         
+        # Verificar si hay herramientas pendientes
+        if session.pending_tools:
+            # Responder inmediatamente sin usar OpenAI si hay tools pendientes
+            await self._handle_message_during_tool_execution(session, content)
+            return
+        
         # Cambiar estado a pensando
         session.state = SessionState.THINKING
         await self._send_message(session.websocket, {
@@ -158,6 +164,94 @@ Recuerda que esta es una conversación de voz, así que sé natural y expresivo 
         
         # Procesar con OpenAI
         await self._process_with_openai(session)
+
+    async def _handle_message_during_tool_execution(self, session: VoiceSession, content: str):
+        """Maneja mensajes del usuario mientras se ejecutan herramientas"""
+        # Respuestas predefinidas para diferentes tipos de mensajes
+        responses = {
+            "status": [
+                "¡Sí, aquí estoy! Estoy trabajando en tu solicitud anterior, pero puedo seguir conversando contigo.",
+                "¡Por supuesto! Sigo aquí procesando tu solicitud. ¿Hay algo más en lo que pueda ayudarte?",
+                "¡Claro que sí! Estoy ejecutando las herramientas que necesitas, pero puedo seguir charlando contigo.",
+                "¡Estoy aquí! Sigo trabajando en segundo plano en tu tarea anterior. ¿Qué más necesitas?"
+            ],
+            "greeting": [
+                "¡Hola! Estoy trabajando en tu solicitud anterior, pero puedo seguir conversando.",
+                "¡Hola de nuevo! Sigo procesando tu petición anterior mientras charlamos.",
+                "¡Saludos! Estoy multitarea: procesando tu solicitud y conversando contigo."
+            ],
+            "question": [
+                "Esa es una buena pregunta. Estoy procesando tu solicitud anterior, pero cuando termine te podré dar una respuesta más completa.",
+                "Interesante pregunta. Ahora mismo estoy ejecutando algunas herramientas para tu solicitud anterior, pero puedo intentar ayudarte.",
+                "Me gusta tu curiosidad. Estoy trabajando en segundo plano en tu tarea previa, pero sigamos conversando."
+            ],
+            "default": [
+                "Entiendo. Estoy procesando tu solicitud anterior en segundo plano, pero puedo seguir conversando contigo.",
+                "Perfecto. Mientras trabajo en tu tarea anterior, podemos seguir charlando sin problema.",
+                "Claro. Estoy ejecutando las herramientas necesarias para tu solicitud previa, pero sigo disponible para conversar.",
+                "Muy bien. Puedo hacer multitarea: procesar tu solicitud anterior y seguir conversando contigo."
+            ]
+        }
+        
+        # Clasificar el tipo de mensaje
+        content_lower = content.lower()
+        
+        if any(word in content_lower for word in ["sigues", "estás", "ahí", "aquí", "available", "there"]):
+            response_type = "status"
+        elif any(word in content_lower for word in ["hola", "hello", "hi", "saludos", "buenas"]):
+            response_type = "greeting"
+        elif content.endswith("?") or any(word in content_lower for word in ["qué", "cómo", "cuándo", "dónde", "por qué", "what", "how", "when", "where", "why"]):
+            response_type = "question"
+        else:
+            response_type = "default"
+        
+        # Seleccionar respuesta (rotar para variedad)
+        import random
+        response = random.choice(responses[response_type])
+        
+        # Agregar información sobre herramientas pendientes
+        pending_count = len(session.pending_tools)
+        if pending_count > 0:
+            tool_info = f" (Tengo {pending_count} herramienta{'s' if pending_count > 1 else ''} ejecutándose)"
+            response += tool_info
+        
+        # Enviar respuesta inmediata
+        session.state = SessionState.SPEAKING
+        await self._send_response_chunks(session, response)
+        session.state = SessionState.IDLE
+        
+        # Agregar al historial para contexto futuro (pero no interferir con OpenAI mientras hay tools pendientes)
+        # Solo agregamos una nota interna, no el mensaje completo para evitar problemas con OpenAI
+
+    async def _send_response_chunks(self, session: VoiceSession, response: str):
+        """Envía respuesta en chunks para simular streaming"""
+        words = response.split(" ")
+        current_chunk = ""
+        
+        for word in words:
+            current_chunk += word + " "
+            
+            # Enviar chunk cada 3-5 palabras
+            if len(current_chunk.split()) >= 4:
+                await self._send_message(session.websocket, {
+                    "type": "response_chunk",
+                    "content": current_chunk.strip()
+                })
+                current_chunk = ""
+                await asyncio.sleep(0.1)  # Pequeña pausa para simular naturalidad
+        
+        # Enviar chunk final si queda contenido
+        if current_chunk.strip():
+            await self._send_message(session.websocket, {
+                "type": "response_chunk",
+                "content": current_chunk.strip()
+            })
+        
+        # Indicar que la respuesta está completa
+        await self._send_message(session.websocket, {
+            "type": "response_complete",
+            "content": "Respuesta completada"
+        })
 
     async def _process_with_openai(self, session: VoiceSession):
         """Procesa la conversación con OpenAI"""
@@ -258,9 +352,7 @@ Recuerda que esta es una conversación de voz, así que sé natural y expresivo 
             session.state = SessionState.IDLE
 
     async def _handle_tool_calls(self, session: VoiceSession, tool_calls: List[Dict], assistant_message: str):
-        """Maneja las llamadas a herramientas de forma asíncrona"""
-        session.state = SessionState.PROCESSING_TOOL
-        
+        """Maneja las llamadas a herramientas de forma completamente asíncrona"""
         # Notificar que se van a ejecutar herramientas
         await self._send_message(session.websocket, {
             "type": "system",
@@ -283,28 +375,136 @@ Recuerda que esta es una conversación de voz, así que sé natural y expresivo 
             ]
         })
         
-        # Ejecutar tools de forma asíncrona
-        tool_tasks = []
+        # Cambiar estado a IDLE para permitir nuevos mensajes
+        session.state = SessionState.IDLE
+        
+        # Ejecutar tools en background sin bloquear
         for tool_call in tool_calls:
             if tool_call:
                 task = asyncio.create_task(
-                    self._execute_tool_async(session, tool_call)
+                    self._execute_tool_in_background(session, tool_call, tool_calls)
                 )
-                tool_tasks.append(task)
                 session.pending_tools[tool_call["id"]] = task
+
+    async def _execute_tool_in_background(self, session: VoiceSession, tool_call: Dict, all_tool_calls: List[Dict]):
+        """Ejecuta una herramienta en background y maneja la respuesta cuando esté lista"""
+        tool_name = tool_call["function"]["name"]
         
-        # Esperar a que todas las tools terminen
         try:
-            results = await asyncio.gather(*tool_tasks, return_exceptions=True)
+            # Notificar inicio de ejecución de tool
+            await self._send_message(session.websocket, {
+                "type": "system",
+                "content": f"Ejecutando: {tool_name}..."
+            })
             
-            # Procesar resultados y generar respuesta final
-            await self._process_tool_results(session, tool_calls, results)
+            # Parsear argumentos
+            arguments = json.loads(tool_call["function"]["arguments"])
+            
+            # Ejecutar la herramienta
+            result = await self.tool_manager.execute_tool(tool_name, arguments)
+            
+            # Notificar finalización
+            await self._send_message(session.websocket, {
+                "type": "system",
+                "content": f"✓ {tool_name} completado"
+            })
+            
+            # Agregar resultado al historial
+            session.conversation_history.append({
+                "role": "tool",
+                "tool_call_id": tool_call["id"],
+                "content": str(result)
+            })
+            
+            # Remover de pending tools
+            if tool_call["id"] in session.pending_tools:
+                del session.pending_tools[tool_call["id"]]
+            
+            # Verificar si todas las herramientas han terminado
+            remaining_tools = [tc for tc in all_tool_calls if tc and tc["id"] in session.pending_tools]
+            
+            if not remaining_tools:
+                # Todas las herramientas han terminado, generar respuesta final
+                await self._generate_final_tool_response(session)
             
         except Exception as e:
-            logger.error(f"Error ejecutando tools: {str(e)}")
+            error_msg = f"Error ejecutando {tool_name}: {str(e)}"
+            logger.error(error_msg)
+            
+            await self._send_message(session.websocket, {
+                "type": "system",
+                "content": f"❌ Error en {tool_name}: {str(e)}"
+            })
+            
+            # Agregar resultado de error al historial
+            session.conversation_history.append({
+                "role": "tool",
+                "tool_call_id": tool_call["id"],
+                "content": error_msg
+            })
+            
+            # Remover de pending tools
+            if tool_call["id"] in session.pending_tools:
+                del session.pending_tools[tool_call["id"]]
+    
+    async def _generate_final_tool_response(self, session: VoiceSession):
+        """Genera respuesta final cuando todas las herramientas han terminado"""
+        try:
+            # Notificar que se están procesando los resultados
+            await self._send_message(session.websocket, {
+                "type": "system",
+                "content": "Procesando resultados de herramientas..."
+            })
+            
+            # Cambiar estado a pensando
+            session.state = SessionState.THINKING
+            
+            # Preparar mensajes con el historial completo
+            messages = [{"role": "system", "content": self.system_prompt}]
+            messages.extend(session.conversation_history)
+            
+            # Nueva llamada sin tools para respuesta final
+            response = await self.client.chat.completions.create(
+                model=config.AZURE_OPENAI_DEPLOYMENT_NAME,
+                messages=messages,
+                max_tokens=config.MAX_TOKENS,
+                temperature=config.TEMPERATURE,
+                stream=True,
+            )
+            
+            # Enviar respuesta final en streaming
+            session.state = SessionState.SPEAKING
+            final_response = ""
+            
+            async for chunk in response:
+                if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
+                    content = chunk.choices[0].delta.content
+                    final_response += content
+                    await self._send_message(session.websocket, {
+                        "type": "response_chunk",
+                        "content": content
+                    })
+            
+            # Agregar respuesta final al historial
+            if final_response:
+                session.conversation_history.append({
+                    "role": "assistant",
+                    "content": final_response
+                })
+            
+            # Conversación completada
+            await self._send_message(session.websocket, {
+                "type": "response_complete",
+                "content": "Respuesta completada"
+            })
+            
+            session.state = SessionState.IDLE
+            
+        except Exception as e:
+            logger.error(f"Error generando respuesta final: {str(e)}")
             await self._send_message(session.websocket, {
                 "type": "error",
-                "content": "Error ejecutando herramientas"
+                "content": "Error procesando los resultados de las herramientas"
             })
             session.state = SessionState.IDLE
 
@@ -343,75 +543,6 @@ Recuerda que esta es una conversación de voz, así que sé natural y expresivo 
             })
             
             return error_msg
-
-    async def _process_tool_results(self, session: VoiceSession, tool_calls: List[Dict], results: List[str]):
-        """Procesa los resultados de las herramientas y genera respuesta final"""
-        try:
-            # Agregar resultados de tools al historial
-            for i, (tool_call, result) in enumerate(zip(tool_calls, results)):
-                if tool_call:
-                    session.conversation_history.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call["id"],
-                        "content": str(result)
-                    })
-            
-            # Limpiar tools pendientes
-            session.pending_tools.clear()
-            
-            # Obtener respuesta final de OpenAI
-            await self._send_message(session.websocket, {
-                "type": "agent_thinking",
-                "content": "Procesando resultados..."
-            })
-            
-            messages = [{"role": "system", "content": self.system_prompt}]
-            messages.extend(session.conversation_history)
-            
-            # Nueva llamada sin tools para respuesta final
-            response = await self.client.chat.completions.create(
-                model=config.AZURE_OPENAI_DEPLOYMENT_NAME,
-                messages=messages,
-                max_tokens=config.MAX_TOKENS,
-                temperature=config.TEMPERATURE,
-                stream=True,
-            )
-            
-            # Enviar respuesta final en streaming
-            session.state = SessionState.SPEAKING
-            final_response = ""
-            
-            async for chunk in response:
-                if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
-                    content = chunk.choices[0].delta.content
-                    final_response += content
-                    await self._send_message(session.websocket, {
-                        "type": "response_chunk",
-                        "content": content
-                    })
-            
-            # Agregar respuesta final al historial
-            if final_response:
-                session.conversation_history.append({
-                    "role": "assistant",
-                    "content": final_response
-                })
-            
-            # Conversación completada
-            await self._send_message(session.websocket, {
-                "type": "response_complete",
-                "content": "Conversación completada"
-            })
-            
-            session.state = SessionState.IDLE
-            
-        except Exception as e:
-            logger.error(f"Error procesando resultados de tools: {str(e)}")
-            await self._send_message(session.websocket, {
-                "type": "error",
-                "content": "Error procesando los resultados"
-            })
-            session.state = SessionState.IDLE
 
     async def close_session(self, session_id: str):
         """Cierra una sesión de conversación"""
