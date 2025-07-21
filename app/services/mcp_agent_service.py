@@ -18,6 +18,7 @@ from config.config import config
 from config.logger_config import logger
 
 
+
 class MCPAgentService:
     """Service that uses OpenAI Agents with Azure OpenAI and MCP servers"""
     
@@ -244,47 +245,44 @@ Always be helpful, accurate, and provide clear explanations of what you're doing
             raise
     
     async def _regular_completion(self, agent: Agent, messages: List[Dict], context: Dict) -> Dict[str, Any]:
-        """Handle non-streaming completion with MCP servers"""
         try:
             logger.info("Running MCP agent for regular completion...")
             
-            # Use the last user message as input for the runner
             user_message = messages[-1]["content"] if messages else "Hello"
-            
-            # Use context manager for MCP server connection (like in the official example)
-            mcp_server_configs = [
-                {
-                    "name": "deepwiki_mcp",
-                    "url": "https://mcp.deepwiki.com/sse",
-                }
-            ]
-            
-            # Try with the first available server
+
+            print(f"User message: {user_message} type: {type(user_message)}")
+
             async with MCPServerSse(
                 name="DeepWiki MCP Server",
                 params={
-                    "url": "https://mcp.deepwiki.com/sse",
+                    "url": "http://127.0.0.1:8000/sse",
                 },
             ) as mcp_server:
                 
-                # Create agent with MCP server and ModelSettings like the example
                 agent = Agent(
                     name="Assistant",
                     instructions="Use the tools to answer the questions.",
-                    model="gpt-4o",  # Use simple model name instead of deployment name
+                    model="gpt-4o",  # Usar deployment name de Azure
                     mcp_servers=[mcp_server],
-                    model_settings=ModelSettings(tool_choice="auto")  # Change to auto instead of required
+                    model_settings=ModelSettings(tool_choice="auto")
                 )
+
+                print(f"Agent created: {agent.name}")
                 
-                # Run the agent with MCP servers
-                runner_result = await Runner.run(
-                    starting_agent=agent,
-                    input=user_message
-                )
+                try:
+                    runner_result = await Runner.run(
+                        starting_agent=agent,
+                        input=user_message  # Asegúrate que esto sea un string
+                    )
+                except Exception as runner_error:
+                    print(f"Runner error details: {str(runner_error)}")
+                    print(f"Runner error type: {type(runner_error)}")
+                    raise runner_error
+
+                print(f"Runner result: {runner_result} type: {type(runner_result)}")
                 
-                # Extract the response from the runner result
                 response_content = runner_result.final_output or str(runner_result)
-            
+
             logger.info(f"MCP agent completed successfully - Response length: {len(str(response_content))} chars")
             
             return {
@@ -302,6 +300,7 @@ Always be helpful, accurate, and provide clear explanations of what you're doing
         except Exception as e:
             logger.error(f"Error in _regular_completion: {str(e)}")
             raise Exception(f"MCP Agent completion failed: {str(e)}")
+
     
     async def _stream_completion(self, agent: Agent, messages: List[Dict], context: Dict) -> AsyncGenerator[str, None]:
         """Handle streaming completion with MCP servers"""
