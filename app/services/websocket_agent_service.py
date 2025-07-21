@@ -68,13 +68,16 @@ CARACTERÍSTICAS IMPORTANTES:
 - Usa un tono amigable y natural, como si fueras un amigo conocedor
 - Si necesitas usar una herramienta, explica brevemente qué vas a hacer
 - Mantén el contexto de la conversación anterior
-- Si una herramienta tarda en ejecutarse, tranquiliza al usuario
+- Cuando las herramientas terminan de ejecutarse, presenta los resultados de manera clara y útil
 
 COMPORTAMIENTO EN CONVERSACIÓN:
 - Escucha activamente y responde apropiadamente al contexto
 - Haz preguntas de seguimiento cuando sea relevante
 - Si el usuario parece estar esperando, ofrece actualizaciones sobre el progreso
 - Mantén las respuestas conversacionales, no robóticas
+- Al presentar resultados de herramientas, sé directo y claro
+
+IMPORTANTE: Si acabas de ejecutar herramientas y tienes sus resultados, presenta la información solicitada de manera directa y útil. No repitas conversaciones previas, enfócate en responder con los datos obtenidos.
 
 Recuerda que esta es una conversación de voz, así que sé natural y expresivo en tus respuestas.
 """
@@ -186,6 +189,10 @@ Recuerda que esta es una conversación de voz, así que sé natural y expresivo 
             await self._send_response_chunks(session, response)
             session.state = SessionState.IDLE
             
+            # IMPORTANTE: NO agregamos esta respuesta al historial principal
+            # Solo es para mantener la conversación fluida durante la ejecución de herramientas
+            # El historial principal se mantiene limpio para evitar duplicaciones
+            
         except Exception as e:
             logger.error(f"Error generando respuesta dinámica durante ejecución de herramientas: {str(e)}")
             # Fallback a respuesta básica si falla OpenAI
@@ -214,23 +221,25 @@ Recuerda que esta es una conversación de voz, así que sé natural y expresivo 
             
             # Prompt específico para respuestas durante ejecución de herramientas
             dynamic_prompt = f"""
-Eres un asistente de voz que está ejecutando herramientas en segundo plano. Actualmente tienes {len(session.pending_tools)} herramientas ejecutándose: {tools_description}.
+Eres un asistente de voz que está ejecutando herramientas en segundo plano. Actualmente tienes {len(session.pending_tools)} herramientas ejecutándose.
 
 El usuario acaba de escribir: "{content}"
 
 CONTEXTO IMPORTANTE:
-- Estás procesando herramientas en segundo plano, pero puedes seguir conversando
-- No interrumpas las herramientas que se están ejecutando
-- Mantén la conversación fluida y natural
-- Si el usuario pregunta sobre el estado, tranquilízalo pero no des detalles técnicos
-- Si hace una nueva pregunta, responde pero menciona que las herramientas anteriores siguen ejecutándose
+- Estás procesando herramientas en segundo plano para una solicitud anterior
+- Esta es una conversación paralela que NO debe interferir con el resultado principal
+- Tu respuesta es solo para mantener la interacción fluida mientras espera
+- NO respondas a la solicitud original, solo mantén la conversación
 
 INSTRUCCIONES:
-- Responde de manera natural y conversacional
-- Máximo 2-3 oraciones
-- Sé amigable y tranquilizador
+- Responde de manera natural y conversacional al mensaje actual
+- Máximo 1-2 oraciones
+- Sé amigable y mantén la conversación ligera
+- Si te preguntan sobre el estado, confirma que sigues trabajando
+- Si es una pregunta simple (como matemáticas), puedes responder brevemente
 - No menciones detalles técnicos sobre las herramientas
-- Si es apropiado, pregunta algo relacionado o ofrece ayuda adicional
+
+Esta respuesta es temporal y no afectará el resultado principal que se entregará cuando las herramientas terminen.
 
 Responde solo el texto de tu respuesta, sin explicaciones adicionales."""
 
@@ -526,7 +535,15 @@ Responde solo el texto de tu respuesta, sin explicaciones adicionales."""
             session.state = SessionState.THINKING
             
             # Preparar mensajes con el historial completo
-            messages = [{"role": "system", "content": self.system_prompt}]
+            # Crear un prompt específico para respuesta final con resultados de herramientas
+            final_system_prompt = self.system_prompt + """
+
+SITUACIÓN ACTUAL: Acabas de completar la ejecución de herramientas solicitadas por el usuario. Tienes los resultados disponibles en el historial de conversación.
+
+INSTRUCCIÓN ESPECÍFICA: Presenta los resultados de las herramientas de manera clara y directa. Responde a la solicitud original del usuario con la información obtenida. No repitas conversaciones intermedias que puedan haber ocurrido durante la ejecución.
+"""
+            
+            messages = [{"role": "system", "content": final_system_prompt}]
             messages.extend(session.conversation_history)
             
             # Nueva llamada sin tools para respuesta final
@@ -573,42 +590,6 @@ Responde solo el texto de tu respuesta, sin explicaciones adicionales."""
                 "content": "Error procesando los resultados de las herramientas"
             })
             session.state = SessionState.IDLE
-
-    async def _execute_tool_async(self, session: VoiceSession, tool_call: Dict) -> str:
-        """Ejecuta una herramienta de forma asíncrona"""
-        tool_name = tool_call["function"]["name"]
-        
-        try:
-            # Notificar inicio de ejecución de tool
-            await self._send_message(session.websocket, {
-                "type": "system",
-                "content": f"Ejecutando: {tool_name}..."
-            })
-            
-            # Parsear argumentos
-            arguments = json.loads(tool_call["function"]["arguments"])
-            
-            # Ejecutar la herramienta
-            result = await self.tool_manager.execute_tool(tool_name, arguments)
-            
-            # Notificar finalización
-            await self._send_message(session.websocket, {
-                "type": "system",
-                "content": f"✓ {tool_name} completado"
-            })
-            
-            return str(result)
-            
-        except Exception as e:
-            error_msg = f"Error ejecutando {tool_name}: {str(e)}"
-            logger.error(error_msg)
-            
-            await self._send_message(session.websocket, {
-                "type": "system",
-                "content": f"❌ Error en {tool_name}"
-            })
-            
-            return error_msg
 
     async def close_session(self, session_id: str):
         """Cierra una sesión de conversación"""
