@@ -175,9 +175,9 @@ Recuerda que esta es una conversación de voz, así que sé natural y expresivo 
         await self._process_with_openai(session)
 
     async def _handle_message_during_tool_execution(self, session: VoiceSession, content: str):
-        """Maneja mensajes del usuario mientras se ejecutan herramientas - MEJORADO sin fallbacks"""
+        """Maneja mensajes del usuario mientras se ejecutan herramientas - MEJORADO con mejor contexto"""
         try:
-            # Generar respuesta dinámica con cliente async existente
+            # Generar respuesta dinámica con cliente async existente y contexto mejorado
             response = await self._generate_dynamic_response_during_tools(session, content)
             
             # Enviar respuesta generada dinámicamente
@@ -185,15 +185,21 @@ Recuerda que esta es una conversación de voz, así que sé natural y expresivo 
             await self._send_response_chunks(session, response)
             session.state = SessionState.IDLE
             
-            # IMPORTANTE: Guardamos en historial temporal, NO en el principal
+            # IMPORTANTE: Guardamos en historial temporal con timestamp para ordenar
             session.temp_conversation_history.append({
                 "role": "user",
-                "content": content
+                "content": content,
+                "timestamp": datetime.now(timezone.utc).isoformat()
             })
             session.temp_conversation_history.append({
                 "role": "assistant", 
-                "content": response
+                "content": response,
+                "timestamp": datetime.now(timezone.utc).isoformat()
             })
+            
+            # Limitar historial temporal para no sobrecargar (máximo 8 mensajes = 4 intercambios)
+            if len(session.temp_conversation_history) > 8:
+                session.temp_conversation_history = session.temp_conversation_history[-8:]
             
         except Exception as e:
             logger.error(f"Error generando respuesta dinámica durante ejecución de herramientas: {str(e)}")
@@ -201,7 +207,7 @@ Recuerda que esta es una conversación de voz, así que sé natural y expresivo 
             await self._send_emergency_response_during_tools(session, content)
     
     async def _generate_dynamic_response_during_tools(self, session: VoiceSession, content: str) -> str:
-        """Genera respuesta dinámica usando el cliente async mientras las herramientas corren"""
+        """Genera respuesta dinámica usando el cliente async mientras las herramientas corren - MEJORADO con mejor contexto"""
         
         pending_tools_count = len(session.pending_tools)
         
@@ -213,45 +219,34 @@ CONTEXTO IMPORTANTE:
 - Estás procesando herramientas en segundo plano para una solicitud anterior
 - Esta es una conversación paralela que NO debe interferir con el resultado principal
 - Tu respuesta es solo para mantener la interacción fluida mientras espera
+- Tienes acceso al contexto de la conversación para responder apropiadamente
 - NO respondas a la solicitud original, solo mantén la conversación
 
 El usuario acaba de escribir: "{content}"
 
 INSTRUCCIONES:
-- No debes responder nada relacionado con las herramientas en ejecución
 - Responde de manera natural y conversacional al mensaje actual
+- Usa el contexto de la conversación para dar respuestas más relevantes
 - Máximo 1-2 oraciones
 - Sé amigable y mantén la conversación ligera
 - Si te preguntan sobre el estado, confirma que sigues trabajando
 - Si es una pregunta simple, puedes responder brevemente
+- Si hace referencia a algo de la conversación anterior, puedes mencionarlo brevemente
 - No menciones detalles técnicos sobre las herramientas
 
 Responde solo el texto de tu respuesta, sin explicaciones adicionales.
 """
 
         try:
-            # Preparar mensajes incluyendo historial de conversación principal
+            # Crear historial completo y limpio para mejor contexto
             messages = [{"role": "system", "content": dynamic_prompt}]
             
-            # FILTRAR historial para evitar tool_calls sin respuesta
-            recent_history = session.conversation_history[-4:] if len(session.conversation_history) > 4 else session.conversation_history
+            # MÉTODO MEJORADO: Crear historial limpio con contexto completo
+            clean_history = self._build_clean_conversation_history(session)
             
-            # Solo incluir mensajes que no tengan tool_calls pendientes
-            filtered_history = []
-            for msg in recent_history:
-                # Si es un mensaje del asistente con tool_calls, saltarlo para evitar el error 400
-                if msg.get("role") == "assistant" and msg.get("tool_calls"):
-                    continue
-                # Si es un mensaje de herramienta, también saltarlo (está en proceso)
-                if msg.get("role") == "tool":
-                    continue
-                filtered_history.append(msg)
-            
-            messages.extend(filtered_history)
-            
-            # Agregar historial temporal si existe
-            if session.temp_conversation_history:
-                messages.extend(session.temp_conversation_history[-2:])  # Últimas 2 interacciones temporales
+            # Agregar historial limpio (máximo últimos 6 mensajes para no sobrecargar)
+            if clean_history:
+                messages.extend(clean_history[-6:])
             
             # Agregar mensaje actual
             messages.append({"role": "user", "content": content})
@@ -643,6 +638,42 @@ INSTRUCCIÓN ESPECÍFICA: Presenta los resultados de las herramientas de manera 
     def get_active_sessions_count(self) -> int:
         """Obtiene el número de sesiones activas"""
         return len(self.active_sessions)
+    
+    def _build_clean_conversation_history(self, session: VoiceSession) -> List[Dict[str, str]]:
+        """Construye un historial limpio para usar durante la ejecución de herramientas"""
+        clean_history = []
+        
+        # Procesar historial principal eliminando tool_calls problemáticos
+        for msg in session.conversation_history:
+            if msg.get("role") == "user":
+                # Mensajes del usuario siempre incluirlos
+                clean_msg = {
+                    "role": "user",
+                    "content": msg.get("content", "")
+                }
+                clean_history.append(clean_msg)
+            elif msg.get("role") == "assistant":
+                # Para mensajes del asistente, quitar tool_calls si existen
+                clean_msg = {
+                    "role": "assistant",
+                    "content": msg.get("content", "")
+                }
+                # Solo agregar si tiene contenido (no solo tool_calls vacíos)
+                if clean_msg["content"].strip():
+                    clean_history.append(clean_msg)
+            # Saltar mensajes de "tool" que están en proceso
+        
+        # Agregar historial temporal (conversaciones durante herramientas) sin timestamps
+        if session.temp_conversation_history:
+            for temp_msg in session.temp_conversation_history:
+                clean_msg = {
+                    "role": temp_msg.get("role"),
+                    "content": temp_msg.get("content", "")
+                }
+                if clean_msg["content"].strip():
+                    clean_history.append(clean_msg)
+        
+        return clean_history
 
 
 # Instancia global del servicio
