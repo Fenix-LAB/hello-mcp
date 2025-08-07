@@ -1,10 +1,10 @@
 """
 WebSocket Agent Service - Maneja conversaciones en tiempo real con el agente
+MEJORADO: Un solo cliente async, sin mensajes fallback, historial limpio
 """
 import asyncio
 import json
 import uuid
-import random
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass, field
@@ -39,12 +39,15 @@ class VoiceSession:
     pending_tools: Dict[str, asyncio.Task] = field(default_factory=dict)
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     last_activity: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    # Nuevo: historial separado para respuestas durante ejecución de herramientas
+    temp_conversation_history: List[Dict[str, str]] = field(default_factory=list)
 
 
 class WebSocketAgentService:
     """Servicio principal para manejo de WebSocket y conversaciones de voz"""
     
     def __init__(self):
+        # Cliente async único para todas las operaciones
         self.client = AsyncAzureOpenAI(
             azure_endpoint=config.AZURE_OPENAI_ENDPOINT,
             api_key=config.AZURE_OPENAI_API_KEY,
@@ -54,9 +57,6 @@ class WebSocketAgentService:
         )
         self.tool_manager = ToolManager()
         self.active_sessions: Dict[str, VoiceSession] = {}
-        
-        # ThreadPoolExecutor para respuestas paralelas durante ejecución de herramientas
-        # ELIMINADO: Usamos solo asyncio y cliente async
         
         # Prompt del sistema optimizado para conversación de voz
         self.system_prompt = """
@@ -152,7 +152,7 @@ Recuerda que esta es una conversación de voz, así que sé natural y expresivo 
         
         # Verificar si hay herramientas pendientes
         if session.pending_tools:
-            # Responder inmediatamente sin usar OpenAI si hay tools pendientes
+            # Manejar conversación paralela mientras se ejecutan herramientas
             await self._handle_message_during_tool_execution(session, content)
             return
         
@@ -173,60 +173,39 @@ Recuerda que esta es una conversación de voz, así que sé natural y expresivo 
         await self._process_with_openai(session)
 
     async def _handle_message_during_tool_execution(self, session: VoiceSession, content: str):
-        """Maneja mensajes del usuario mientras se ejecutan herramientas usando OpenAI dinámico"""
+        """Maneja mensajes del usuario mientras se ejecutan herramientas - MEJORADO sin fallbacks"""
         try:
-            # Ejecutar en un hilo separado para no bloquear la ejecución de herramientas
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.thread_pool,
-                self._generate_dynamic_response_during_tools,
-                session, content
-            )
+            # Generar respuesta dinámica con cliente async existente
+            response = await self._generate_dynamic_response_during_tools(session, content)
             
             # Enviar respuesta generada dinámicamente
             session.state = SessionState.SPEAKING
             await self._send_response_chunks(session, response)
             session.state = SessionState.IDLE
             
-            # IMPORTANTE: NO agregamos esta respuesta al historial principal
-            # Solo es para mantener la conversación fluida durante la ejecución de herramientas
-            # El historial principal se mantiene limpio para evitar duplicaciones
+            # IMPORTANTE: Guardamos en historial temporal, NO en el principal
+            session.temp_conversation_history.append({
+                "role": "user",
+                "content": content
+            })
+            session.temp_conversation_history.append({
+                "role": "assistant", 
+                "content": response
+            })
             
         except Exception as e:
             logger.error(f"Error generando respuesta dinámica durante ejecución de herramientas: {str(e)}")
-            # Fallback a respuesta básica si falla OpenAI
-            await self._send_fallback_response_during_tools(session, content)
+            # Último recurso: respuesta de emergencia usando IA
+            await self._send_emergency_response_during_tools(session, content)
     
-    def _generate_dynamic_response_during_tools(self, session: VoiceSession, content: str) -> str:
-        """Genera respuesta dinámica usando OpenAI en un hilo separado
+    async def _generate_dynamic_response_during_tools(self, session: VoiceSession, content: str) -> str:
+        """Genera respuesta dinámica usando el cliente async mientras las herramientas corren"""
         
-        La respuesta dinamica no deberia intanciar otra vez el cliente OpenAI
+        pending_tools_count = len(session.pending_tools)
         
-        """
-        import asyncio
-        import nest_asyncio
-        
-        # Permitir asyncio en hilos
-        nest_asyncio.apply()
-        
-        # Crear un nuevo evento loop para este hilo
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-        try:
-            # Crear contexto especial para conversación paralela
-            pending_tools_info = []
-            for tool_id, task in session.pending_tools.items():
-                tool_name = "herramienta"  # Podríamos mejorar esto guardando el nombre
-                pending_tools_info.append(tool_name)
-            
-            tools_description = ", ".join(pending_tools_info) if pending_tools_info else "algunas herramientas"
-            
-            # Prompt específico para respuestas durante ejecución de herramientas
-            dynamic_prompt = f"""
-Eres un asistente de voz que está ejecutando herramientas en segundo plano. Actualmente tienes {len(session.pending_tools)} herramientas ejecutándose.
-
-El usuario acaba de escribir: "{content}"
+        # Prompt específico para respuestas durante ejecución de herramientas
+        dynamic_prompt = f"""
+Eres un asistente de voz que está ejecutando {pending_tools_count} herramienta(s) en segundo plano para una solicitud anterior.
 
 CONTEXTO IMPORTANTE:
 - Estás procesando herramientas en segundo plano para una solicitud anterior
@@ -234,76 +213,73 @@ CONTEXTO IMPORTANTE:
 - Tu respuesta es solo para mantener la interacción fluida mientras espera
 - NO respondas a la solicitud original, solo mantén la conversación
 
+El usuario acaba de escribir: "{content}"
+
 INSTRUCCIONES:
 - Responde de manera natural y conversacional al mensaje actual
 - Máximo 1-2 oraciones
 - Sé amigable y mantén la conversación ligera
 - Si te preguntan sobre el estado, confirma que sigues trabajando
-- Si es una pregunta simple (como matemáticas), puedes responder brevemente
+- Si es una pregunta simple, puedes responder brevemente
 - No menciones detalles técnicos sobre las herramientas
 
-Esta respuesta es temporal y no afectará el resultado principal que se entregará cuando las herramientas terminen.
+Responde solo el texto de tu respuesta, sin explicaciones adicionales.
+"""
 
-Responde solo el texto de tu respuesta, sin explicaciones adicionales."""
-
-            # Crear cliente sincrónico para el hilo
-            from openai import AzureOpenAI
-            sync_client = AzureOpenAI(
-                azure_endpoint=config.AZURE_OPENAI_ENDPOINT,
-                api_key=config.AZURE_OPENAI_API_KEY,
-                api_version=config.AZURE_OPENAI_API_VERSION,
-                timeout=30.0
-            )
+        try:
+            # Preparar mensajes incluyendo historial de conversación principal
+            messages = [{"role": "system", "content": dynamic_prompt}]
             
-            # Generar respuesta
-            response = sync_client.chat.completions.create(
+            # Agregar historial principal (últimos mensajes para contexto)
+            recent_history = session.conversation_history[-4:] if len(session.conversation_history) > 4 else session.conversation_history
+            messages.extend(recent_history)
+            
+            # Agregar historial temporal si existe
+            if session.temp_conversation_history:
+                messages.extend(session.temp_conversation_history[-2:])  # Últimas 2 interacciones temporales
+            
+            # Agregar mensaje actual
+            messages.append({"role": "user", "content": content})
+            
+            # Generar respuesta con cliente async único
+            response = await self.client.chat.completions.create(
                 model=config.AZURE_OPENAI_DEPLOYMENT_NAME,
-                messages=[
-                    {"role": "system", "content": dynamic_prompt}
-                ],
+                messages=messages,
                 max_tokens=150,
                 temperature=0.7,
+                stream=False
             )
             
-            generated_response = response.choices[0].message.content.strip()
-            
-            # Agregar información sobre herramientas si es relevante Tampoco me gusta este mensaje
-            # if len(session.pending_tools) > 0:
-            #     generated_response += f" (Tengo {len(session.pending_tools)} herramienta{'s' if len(session.pending_tools) > 1 else ''} trabajando en segundo plano)"
-            
-            return generated_response
+            return response.choices[0].message.content.strip()
             
         except Exception as e:
             logger.error(f"Error en generación dinámica: {str(e)}")
-            # Fallback a respuesta predefinida
-            return f"Estoy aquí y sigo trabajando en tu solicitud anterior. {content} - Perfecto, sigamos conversando mientras proceso las herramientas en segundo plano."
+            raise e  # Re-lanzar para manejar en el método padre
+    
+    async def _send_emergency_response_during_tools(self, session: VoiceSession, content: str):
+        """Genera respuesta de emergencia usando IA cuando falla la generación principal"""
+        try:
+            # Prompt mínimo para emergencia
+            emergency_prompt = f"Usuario dice: '{content}'. Responde brevemente que estás trabajando en su solicitud anterior pero puedes conversar."
             
-        finally:
-            loop.close()
-    
-    async def _send_fallback_response_during_tools(self, session: VoiceSession, content: str):
-        """Envía respuesta de fallback si falla la generación dinámica
-
-        Este metodo de fallback no me agrada eliminarlo
-    
-        """
-        fallback_responses = [
-            "Estoy aquí y sigo trabajando en tu solicitud. ¿Hay algo más en lo que pueda ayudarte?",
-            "Perfecto. Mientras proceso tu solicitud anterior, podemos seguir conversando.",
-            "Entiendo. Estoy multitarea: trabajando en tu tarea anterior y disponible para conversar contigo.",
-            "¡Claro! Sigo procesando tu solicitud pero puedo seguir charlando contigo sin problema."
-        ]
-        
-        import random
-        response = random.choice(fallback_responses)
-        
-        # Agregar información sobre herramientas pendientes
-        if len(session.pending_tools) > 0:
-            response += f" (Tengo {len(session.pending_tools)} herramienta{'s' if len(session.pending_tools) > 1 else ''} ejecutándose)"
-        
-        session.state = SessionState.SPEAKING
-        await self._send_response_chunks(session, response)
-        session.state = SessionState.IDLE
+            response = await self.client.chat.completions.create(
+                model=config.AZURE_OPENAI_DEPLOYMENT_NAME,
+                messages=[{"role": "system", "content": emergency_prompt}],
+                max_tokens=50,
+                temperature=0.5,
+                stream=False
+            )
+            
+            emergency_response = response.choices[0].message.content.strip()
+            
+            session.state = SessionState.SPEAKING
+            await self._send_response_chunks(session, emergency_response)
+            session.state = SessionState.IDLE
+            
+        except Exception as e:
+            logger.error(f"Error en respuesta de emergencia: {str(e)}")
+            # Último recurso: silencio controlado
+            session.state = SessionState.IDLE
 
     async def _send_response_chunks(self, session: VoiceSession, response: str):
         """Envía respuesta en chunks para simular streaming"""
@@ -338,7 +314,7 @@ Responde solo el texto de tu respuesta, sin explicaciones adicionales."""
     async def _process_with_openai(self, session: VoiceSession):
         """Procesa la conversación con OpenAI"""
         try:
-            # Preparar mensajes
+            # Preparar mensajes usando SOLO el historial principal
             messages = [{"role": "system", "content": self.system_prompt}]
             messages.extend(session.conversation_history)
             
@@ -407,7 +383,7 @@ Responde solo el texto de tu respuesta, sin explicaciones adicionales."""
                                 if tool_call.function.arguments:
                                     tool_calls[tool_call.index]["function"]["arguments"] += tool_call.function.arguments
             
-            # Agregar respuesta al historial
+            # Agregar respuesta al historial PRINCIPAL
             if current_response:
                 session.conversation_history.append({
                     "role": "assistant",
@@ -441,7 +417,7 @@ Responde solo el texto de tu respuesta, sin explicaciones adicionales."""
             "content": "Ejecutando herramientas necesarias para tu solicitud..."
         })
         
-        # Agregar mensaje del asistente con tool calls al historial
+        # Agregar mensaje del asistente con tool calls al historial PRINCIPAL
         session.conversation_history.append({
             "role": "assistant",
             "content": assistant_message,
@@ -457,10 +433,13 @@ Responde solo el texto de tu respuesta, sin explicaciones adicionales."""
             ]
         })
         
+        # Limpiar historial temporal al iniciar nueva ejecución de herramientas
+        session.temp_conversation_history = []
+        
         # Cambiar estado a IDLE para permitir nuevos mensajes
         session.state = SessionState.IDLE
         
-        # Ejecutar tools en background sin bloquear
+        # Ejecutar tools en background con asyncio
         for tool_call in tool_calls:
             if tool_call:
                 task = asyncio.create_task(
@@ -491,7 +470,7 @@ Responde solo el texto de tu respuesta, sin explicaciones adicionales."""
                 "content": f"✓ {tool_name} completado"
             })
             
-            # Agregar resultado al historial
+            # Agregar resultado al historial PRINCIPAL
             session.conversation_history.append({
                 "role": "tool",
                 "tool_call_id": tool_call["id"],
@@ -518,7 +497,7 @@ Responde solo el texto de tu respuesta, sin explicaciones adicionales."""
                 "content": f"❌ Error en {tool_name}: {str(e)}"
             })
             
-            # Agregar resultado de error al historial
+            # Agregar resultado de error al historial PRINCIPAL
             session.conversation_history.append({
                 "role": "tool",
                 "tool_call_id": tool_call["id"],
@@ -530,7 +509,7 @@ Responde solo el texto de tu respuesta, sin explicaciones adicionales."""
                 del session.pending_tools[tool_call["id"]]
     
     async def _generate_final_tool_response(self, session: VoiceSession):
-        """Genera respuesta final cuando todas las herramientas han terminado"""
+        """Genera respuesta final cuando todas las herramientas han terminado - MEJORADO"""
         try:
             # Notificar que se están procesando los resultados
             await self._send_message(session.websocket, {
@@ -541,17 +520,16 @@ Responde solo el texto de tu respuesta, sin explicaciones adicionales."""
             # Cambiar estado a pensando
             session.state = SessionState.THINKING
             
-            # Preparar mensajes con el historial completo
-            # Crear un prompt específico para respuesta final con resultados de herramientas
+            # MEJORADO: Usar SOLO el historial principal, ignorar conversaciones temporales
             final_system_prompt = self.system_prompt + """
 
 SITUACIÓN ACTUAL: Acabas de completar la ejecución de herramientas solicitadas por el usuario. Tienes los resultados disponibles en el historial de conversación.
 
-INSTRUCCIÓN ESPECÍFICA: Presenta los resultados de las herramientas de manera clara y directa. Responde a la solicitud original del usuario con la información obtenida. No repitas conversaciones intermedias que puedan haber ocurrido durante la ejecución.
+INSTRUCCIÓN ESPECÍFICA: Presenta los resultados de las herramientas de manera clara y directa. Responde a la solicitud original del usuario con la información obtenida. NO incluyas conversaciones que ocurrieron durante la ejecución de herramientas.
 """
             
             messages = [{"role": "system", "content": final_system_prompt}]
-            messages.extend(session.conversation_history)
+            messages.extend(session.conversation_history)  # SOLO historial principal
             
             # Nueva llamada sin tools para respuesta final
             response = await self.client.chat.completions.create(
@@ -575,12 +553,15 @@ INSTRUCCIÓN ESPECÍFICA: Presenta los resultados de las herramientas de manera 
                         "content": content
                     })
             
-            # Agregar respuesta final al historial
+            # Agregar respuesta final al historial PRINCIPAL
             if final_response:
                 session.conversation_history.append({
                     "role": "assistant",
                     "content": final_response
                 })
+            
+            # Limpiar historial temporal después de completar
+            session.temp_conversation_history = []
             
             # Conversación completada
             await self._send_message(session.websocket, {
@@ -632,7 +613,8 @@ INSTRUCCIÓN ESPECÍFICA: Presenta los resultados de las herramientas de manera 
             "created_at": session.created_at.isoformat(),
             "last_activity": session.last_activity.isoformat(),
             "message_count": len(session.conversation_history),
-            "pending_tools": len(session.pending_tools)
+            "pending_tools": len(session.pending_tools),
+            "temp_messages": len(session.temp_conversation_history)
         }
 
     def get_active_sessions_count(self) -> int:
