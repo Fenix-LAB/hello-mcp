@@ -166,7 +166,7 @@ class BasicTools:
             Mock weather information
         """
         # TODO: Implement actual weather API integration
-        return f"Weather information for {location}: This is a placeholder tool. In the future, this will integrate with a real weather API to provide current weather conditions, temperature, humidity, and forecast."
+        return f"Weather information for {location} is Sunny, 25°C"
     
     def text_analysis(self, text: str) -> str:
         """
