@@ -1,6 +1,6 @@
 """
 WebSocket Agent Service - Maneja conversaciones en tiempo real con el agente
-MEJORADO: Un solo cliente async, sin mensajes fallback, historial limpio
+
 """
 import asyncio
 import json
@@ -39,7 +39,6 @@ class VoiceSession:
     pending_tools: Dict[str, asyncio.Task] = field(default_factory=dict)
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     last_activity: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    # Nuevo: historial separado para respuestas durante ejecución de herramientas
     temp_conversation_history: List[Dict[str, str]] = field(default_factory=list)
 
 
@@ -60,27 +59,26 @@ class WebSocketAgentService:
         
         # Prompt del sistema optimizado para conversación de voz
         self.system_prompt = """
-Eres un asistente de voz inteligente y conversacional. Tu objetivo es mantener una conversación natural y fluida con el usuario.
+        Eres un asistente de voz inteligente y conversacional. Tu objetivo es mantener una conversación natural y fluida con el usuario.
 
-CARACTERÍSTICAS IMPORTANTES:
-- Responde de manera concisa pero completa
-- Usa un tono amigable y natural, como si fueras un amigo conocedor
-- Si necesitas usar una herramienta, explica brevemente qué vas a hacer
-- Mantén el contexto de la conversación anterior
-- Cuando las herramientas terminan de ejecutarse, presenta los resultados de manera clara y útil
+        CARACTERÍSTICAS IMPORTANTES:
+        - Responde de manera concisa pero completa
+        - Usa un tono amigable y natural, como si fueras un amigo conocedor
+        - Si necesitas usar una herramienta, explica brevemente qué vas a hacer
+        - Mantén el contexto de la conversación anterior
+        - Cuando las herramientas terminan de ejecutarse, presenta los resultados de manera clara y útil
 
-COMPORTAMIENTO EN CONVERSACIÓN:
-- Escucha activamente y responde apropiadamente al contexto
-- Haz preguntas de seguimiento cuando sea relevante
-- Si el usuario parece estar esperando, ofrece actualizaciones sobre el progreso
-- Mantén las respuestas conversacionales, no robóticas
-- Al presentar resultados de herramientas, sé directo y claro
+        COMPORTAMIENTO EN CONVERSACIÓN:
+        - Escucha activamente y responde apropiadamente al contexto
+        - Haz preguntas de seguimiento cuando sea relevante
+        - Si el usuario parece estar esperando, ofrece actualizaciones sobre el progreso
+        - Mantén las respuestas conversacionales, no robóticas
+        - Al presentar resultados de herramientas, sé directo y claro
 
-IMPORTANTE: Si acabas de ejecutar herramientas y tienes sus resultados, presenta la información solicitada de manera directa y útil. No repitas conversaciones previas, enfócate en responder con los datos obtenidos.
+        IMPORTANTE: Si acabas de ejecutar herramientas y tienes sus resultados, presenta la información solicitada de manera directa y útil. No repitas conversaciones previas, enfócate en responder con los datos obtenidos.
 
-Recuerda que esta es una conversación de voz, así que sé natural y expresivo en tus respuestas.
-"""
-    
+        Recuerda que esta es una conversación de voz, así que sé natural y expresivo en tus respuestas.
+        """
 
 
     async def create_session(self, websocket: WebSocket, user_id: str) -> str:
@@ -213,29 +211,29 @@ Recuerda que esta es una conversación de voz, así que sé natural y expresivo 
         
         # Prompt específico para respuestas durante ejecución de herramientas
         dynamic_prompt = f"""
-Eres un asistente de voz que está ejecutando {pending_tools_count} herramienta(s) en segundo plano para una solicitud anterior.
+        Eres un asistente de voz que está ejecutando {pending_tools_count} herramienta(s) en segundo plano para una solicitud anterior.
 
-CONTEXTO IMPORTANTE:
-- Estás procesando herramientas en segundo plano para una solicitud anterior
-- Esta es una conversación paralela que NO debe interferir con el resultado principal
-- Tu respuesta es solo para mantener la interacción fluida mientras espera
-- Tienes acceso al contexto de la conversación para responder apropiadamente
-- NO respondas a la solicitud original, solo mantén la conversación
+        CONTEXTO IMPORTANTE:
+        - Estás procesando herramientas en segundo plano para una solicitud anterior
+        - Esta es una conversación paralela que NO debe interferir con el resultado principal
+        - Tu respuesta es solo para mantener la interacción fluida mientras espera
+        - Tienes acceso al contexto de la conversación para responder apropiadamente
+        - NO respondas a la solicitud original, solo mantén la conversación
 
-El usuario acaba de escribir: "{content}"
+        El usuario acaba de escribir: "{content}"
 
-INSTRUCCIONES:
-- Responde de manera natural y conversacional al mensaje actual
-- Usa el contexto de la conversación para dar respuestas más relevantes
-- Máximo 1-2 oraciones
-- Sé amigable y mantén la conversación ligera
-- Si te preguntan sobre el estado, confirma que sigues trabajando
-- Si es una pregunta simple, puedes responder brevemente
-- Si hace referencia a algo de la conversación anterior, puedes mencionarlo brevemente
-- No menciones detalles técnicos sobre las herramientas
+        INSTRUCCIONES:
+        - Responde de manera natural y conversacional al mensaje actual
+        - Usa el contexto de la conversación para dar respuestas más relevantes
+        - Máximo 1-2 oraciones
+        - Sé amigable y mantén la conversación ligera
+        - Si te preguntan sobre el estado, confirma que sigues trabajando
+        - Si es una pregunta simple, puedes responder brevemente
+        - Si hace referencia a algo de la conversación anterior, puedes mencionarlo brevemente
+        - No menciones detalles técnicos sobre las herramientas
 
-Responde solo el texto de tu respuesta, sin explicaciones adicionales.
-"""
+        Responde solo el texto de tu respuesta, sin explicaciones adicionales.
+        """
 
         try:
             # Crear historial completo y limpio para mejor contexto
@@ -540,10 +538,10 @@ Responde solo el texto de tu respuesta, sin explicaciones adicionales.
             # MEJORADO: Usar SOLO el historial principal, ignorar conversaciones temporales
             final_system_prompt = self.system_prompt + """
 
-SITUACIÓN ACTUAL: Acabas de completar la ejecución de herramientas solicitadas por el usuario. Tienes los resultados disponibles en el historial de conversación.
+            SITUACIÓN ACTUAL: Acabas de completar la ejecución de herramientas solicitadas por el usuario. Tienes los resultados disponibles en el historial de conversación.
 
-INSTRUCCIÓN ESPECÍFICA: Presenta los resultados de las herramientas de manera clara y directa. Responde a la solicitud original del usuario con la información obtenida. NO incluyas conversaciones que ocurrieron durante la ejecución de herramientas. Sigue el hilo de la conversación y responde de manera natural y conversacional.
-"""
+            INSTRUCCIÓN ESPECÍFICA: Presenta los resultados de las herramientas de manera clara y directa. Responde a la solicitud original del usuario con la información obtenida. NO incluyas conversaciones que ocurrieron durante la ejecución de herramientas. Sigue el hilo de la conversación y responde de manera natural y conversacional.
+            """
             
             messages = [{"role": "system", "content": final_system_prompt}]
             messages.extend(session.conversation_history)  # SOLO historial principal
