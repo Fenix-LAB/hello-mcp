@@ -218,6 +218,7 @@ CONTEXTO IMPORTANTE:
 El usuario acaba de escribir: "{content}"
 
 INSTRUCCIONES:
+- No debes responder nada relacionado con las herramientas en ejecución
 - Responde de manera natural y conversacional al mensaje actual
 - Máximo 1-2 oraciones
 - Sé amigable y mantén la conversación ligera
