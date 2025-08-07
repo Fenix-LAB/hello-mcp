@@ -542,7 +542,7 @@ Responde solo el texto de tu respuesta, sin explicaciones adicionales.
 
 SITUACIÓN ACTUAL: Acabas de completar la ejecución de herramientas solicitadas por el usuario. Tienes los resultados disponibles en el historial de conversación.
 
-INSTRUCCIÓN ESPECÍFICA: Presenta los resultados de las herramientas de manera clara y directa. Responde a la solicitud original del usuario con la información obtenida. NO incluyas conversaciones que ocurrieron durante la ejecución de herramientas.
+INSTRUCCIÓN ESPECÍFICA: Presenta los resultados de las herramientas de manera clara y directa. Responde a la solicitud original del usuario con la información obtenida. NO incluyas conversaciones que ocurrieron durante la ejecución de herramientas. Sigue el hilo de la conversación y responde de manera natural y conversacional.
 """
             
             messages = [{"role": "system", "content": final_system_prompt}]
@@ -568,7 +568,7 @@ INSTRUCCIÓN ESPECÍFICA: Presenta los resultados de las herramientas de manera 
             
             # Enviar la respuesta final directamente (sin duplicaciones gracias al frontend)
             if final_response:
-                logger.info(f"Enviando respuesta final: '{final_response[:100]}...'")
+                # logger.info(f"Enviando respuesta final: '{final_response[:100]}...'")
                 
                 # Hacer streaming manual de la respuesta
                 await self._send_response_chunks(session, final_response)
