@@ -393,17 +393,18 @@ Responde solo el texto de tu respuesta, sin explicaciones adicionales.
                                 if tool_call.function.arguments:
                                     tool_calls[tool_call.index]["function"]["arguments"] += tool_call.function.arguments
             
-            # Agregar respuesta al historial PRINCIPAL
-            if current_response:
-                session.conversation_history.append({
-                    "role": "assistant",
-                    "content": current_response
-                })
-            
             # Procesar tool calls si existen
             if tool_calls and any(tc for tc in tool_calls if tc):
-                await self._handle_tool_calls(session, tool_calls, current_response)
+                # SI hay tool_calls, generar confirmación inicial ANTES de ejecutar herramientas
+                await self._generate_tool_confirmation_and_execute(session, tool_calls, current_response)
             else:
+                # NO hay tool_calls, agregar respuesta normal al historial y terminar
+                if current_response:
+                    session.conversation_history.append({
+                        "role": "assistant",
+                        "content": current_response
+                    })
+                
                 # Respuesta completada sin tools
                 await self._send_message(session.websocket, {
                     "type": "response_complete",
@@ -674,6 +675,44 @@ INSTRUCCIÓN ESPECÍFICA: Presenta los resultados de las herramientas de manera 
                     clean_history.append(clean_msg)
         
         return clean_history
+
+    async def _generate_tool_confirmation_and_execute(self, session: VoiceSession, tool_calls: List[Dict], original_response: str):
+        """Genera confirmación inicial cuando se detectan tool_calls y luego ejecuta las herramientas"""
+        try:
+            # PASO 1: Si el LLM ya dio una respuesta con contenido, usarla como confirmación
+            if original_response and original_response.strip():
+                # Agregar la respuesta original al historial
+                session.conversation_history.append({
+                    "role": "assistant",
+                    "content": original_response.strip()
+                })
+                
+                # Completar la respuesta inicial
+                await self._send_message(session.websocket, {
+                    "type": "response_complete",
+                    "content": "Respuesta inicial completada"
+                })
+            else:
+                # Si no hay respuesta del LLM, generar confirmación rápida
+                confirmation_msg = "¡Por supuesto! Déjame obtener esa información."
+                await self._send_response_chunks(session, confirmation_msg)
+                
+                # Agregar confirmación al historial
+                session.conversation_history.append({
+                    "role": "assistant",
+                    "content": confirmation_msg
+                })
+            
+            # PASO 2: Ejecutar las herramientas
+            await self._handle_tool_calls(session, tool_calls, original_response or "")
+            
+        except Exception as e:
+            logger.error(f"Error generando confirmación y ejecutando herramientas: {str(e)}")
+            await self._send_message(session.websocket, {
+                "type": "error",
+                "content": "Error procesando herramientas"
+            })
+            session.state = SessionState.IDLE
 
 
 # Instancia global del servicio
