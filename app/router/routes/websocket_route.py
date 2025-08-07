@@ -294,6 +294,11 @@ async def get_test_page():
                         currentResponse = "";
                         currentMessageElement = null;
                         break;
+                    case 'final_response_start':
+                        // Nueva respuesta final - limpiar acumulación anterior
+                        currentResponse = "";
+                        currentMessageElement = null;
+                        break;
                     case 'response_chunk':
                         currentResponse += data.content;
                         // Actualizar el último mensaje del agente o crear uno nuevo
@@ -306,6 +311,8 @@ async def get_test_page():
                     case 'response_complete':
                         addMessage('✓ Respuesta completada', 'system');
                         currentMessageElement = null;
+                        // Limpiar response acumulada para la próxima respuesta
+                        currentResponse = "";
                         break;
                     case 'error':
                         addMessage(`Error: ${data.content}`, 'error');

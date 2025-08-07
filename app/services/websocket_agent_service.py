@@ -80,6 +80,8 @@ IMPORTANTE: Si acabas de ejecutar herramientas y tienes sus resultados, presenta
 
 Recuerda que esta es una conversación de voz, así que sé natural y expresivo en tus respuestas.
 """
+    
+
 
     async def create_session(self, websocket: WebSocket, user_id: str) -> str:
         """Crea una nueva sesión de conversación"""
@@ -230,9 +232,21 @@ Responde solo el texto de tu respuesta, sin explicaciones adicionales.
             # Preparar mensajes incluyendo historial de conversación principal
             messages = [{"role": "system", "content": dynamic_prompt}]
             
-            # Agregar historial principal (últimos mensajes para contexto)
+            # FILTRAR historial para evitar tool_calls sin respuesta
             recent_history = session.conversation_history[-4:] if len(session.conversation_history) > 4 else session.conversation_history
-            messages.extend(recent_history)
+            
+            # Solo incluir mensajes que no tengan tool_calls pendientes
+            filtered_history = []
+            for msg in recent_history:
+                # Si es un mensaje del asistente con tool_calls, saltarlo para evitar el error 400
+                if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                    continue
+                # Si es un mensaje de herramienta, también saltarlo (está en proceso)
+                if msg.get("role") == "tool":
+                    continue
+                filtered_history.append(msg)
+            
+            messages.extend(filtered_history)
             
             # Agregar historial temporal si existe
             if session.temp_conversation_history:
@@ -517,6 +531,12 @@ Responde solo el texto de tu respuesta, sin explicaciones adicionales.
                 "content": "Procesando resultados de herramientas..."
             })
             
+            # Enviar mensaje especial para indicar que inicia la respuesta final
+            await self._send_message(session.websocket, {
+                "type": "final_response_start",
+                "content": "Iniciando respuesta final"
+            })
+            
             # Cambiar estado a pensando
             session.state = SessionState.THINKING
             
@@ -540,21 +560,23 @@ INSTRUCCIÓN ESPECÍFICA: Presenta los resultados de las herramientas de manera 
                 stream=True,
             )
             
-            # Enviar respuesta final en streaming
+            # Acumular toda la respuesta primero (sin streaming directo)
             session.state = SessionState.SPEAKING
             final_response = ""
             
+            # Acumular toda la respuesta sin enviar chunks aún
             async for chunk in response:
                 if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
-                    content = chunk.choices[0].delta.content
-                    final_response += content
-                    await self._send_message(session.websocket, {
-                        "type": "response_chunk",
-                        "content": content
-                    })
+                    final_response += chunk.choices[0].delta.content
             
-            # Agregar respuesta final al historial PRINCIPAL
+            # Enviar la respuesta final directamente (sin duplicaciones gracias al frontend)
             if final_response:
+                logger.info(f"Enviando respuesta final: '{final_response[:100]}...'")
+                
+                # Hacer streaming manual de la respuesta
+                await self._send_response_chunks(session, final_response)
+                
+                # Agregar respuesta al historial
                 session.conversation_history.append({
                     "role": "assistant",
                     "content": final_response
